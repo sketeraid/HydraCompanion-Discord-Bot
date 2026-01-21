@@ -7,6 +7,8 @@ TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 intents = discord.Intents.default()
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="$", intents=intents)
 scheduler = AsyncIOScheduler(timezone="Europe/London")
 
@@ -24,7 +26,7 @@ async def on_ready():
         send_weekly_warning,
         "cron",
         day_of_week="tue",
-        hour=8,
+        hour=12,
         minute=0
     )
 
