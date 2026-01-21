@@ -59,6 +59,7 @@ async def chests(ctx):
     await ctx.send(message)
     await ctx.message.delete()
     @bot.command()
+    
 @bot.command()
 async def remindme(ctx, time: str, *, reminder: str):
     await ctx.message.delete()
