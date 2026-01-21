@@ -58,7 +58,8 @@ async def chests(ctx):
     )
     await ctx.send(message)
     await ctx.message.delete()
-    @bot.command()
+
+
 @bot.command()
 async def remindme(ctx, time: str, *, reminder: str):
     await ctx.message.delete()
@@ -82,7 +83,6 @@ async def remindme(ctx, time: str, *, reminder: str):
         await ctx.send("Invalid time unit. Use m, h, or d.")
         return
 
-    # Store reminder
     user_id = ctx.author.id
     if user_id not in reminders:
         reminders[user_id] = []
@@ -98,13 +98,11 @@ async def remindme(ctx, time: str, *, reminder: str):
 
     await asyncio.sleep(seconds)
 
-    # DM user when time is up
     try:
         await ctx.author.send(f"🔔 Reminder #{reminder_id}: **{reminder}**")
     except:
         await ctx.send(f"{ctx.author.mention} I couldn't DM you, but here's your reminder:\n**{reminder}**")
 
-    # Remove reminder after it fires
     reminders[user_id] = [r for r in reminders[user_id] if r["id"] != reminder_id]
 
 
