@@ -3,6 +3,9 @@ import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+TOKEN = os.getenv("a21ef1a054f0106b935dd74366101e87bb85a47d1b02cbde83835861e03da5f1")
+CHANNEL_ID = int(os.getenv("1463574113829519585"))
+
 TOKEN = "a21ef1a054f0106b935dd74366101e87bb85a47d1b02cbde83835861e03da5f1"
  CHANNEL_ID = 1463574113829519585
 
