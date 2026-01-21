@@ -34,7 +34,6 @@ async def on_ready():
 async def test(ctx):
     await ctx.send("Hydra warning test successful.")
 @bot.command()
-@bot.command()
 async def chests(ctx):
     message = (
         "**Hydra Chest Requirements**\n"
