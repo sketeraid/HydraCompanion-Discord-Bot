@@ -56,4 +56,5 @@ async def chests(ctx):
         "Nightmare – Over 36.6M"
     )
     await ctx.send(message)
+    await ctx.message.delete()
 bot.run(TOKEN)
