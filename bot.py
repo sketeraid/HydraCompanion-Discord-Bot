@@ -19,7 +19,6 @@ async def send_weekly_warning():
         await channel.send("24 HOUR WARNING FOR HYDRA CLASH, Don't forget or you'll miss out on rewards!")
 
 @bot.event
-@bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     channel = bot.get_channel(CHANNEL_ID)
