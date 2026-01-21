@@ -188,7 +188,7 @@ async def should_i_pull(ctx, *, event: str = None):
         color=colour
     )
 
-     embed.add_field(name="Requested by", value=ctx.author.mention, inline=False)
+    embed.add_field(name="Requested by", value=ctx.author.mention, inline=False)
 
     if event:
         embed.add_field(name="Event", value=event, inline=False)
