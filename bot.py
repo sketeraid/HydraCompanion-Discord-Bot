@@ -7,12 +7,12 @@ TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 TOKEN = "a21ef1a054f0106b935dd74366101e87bb85a47d1b02cbde83835861e03da5f1"
- CHANNEL_ID = "1463574113829519585"
+CHANNEL_ID = "1463574113829519585"
 
  intents = discord.Intents.default()
  bot = commands.Bot(command_prefix="!", intents=intents)
 
- scheduler = AsyncIOScheduler()
+ scheduler = AsyncIOScheduler()git
 
  @bot.event
  async def on_ready():
