@@ -2,6 +2,7 @@ import os
 import discord
 from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import asyncio
 reminders = {}
 
 TOKEN = os.getenv("TOKEN")
