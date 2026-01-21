@@ -12,7 +12,7 @@ CHANNEL_ID = "1463574113829519585"
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-scheduler = AsyncIOScheduler()git
+scheduler = AsyncIOScheduler()
 
  @bot.event
  async def on_ready():
