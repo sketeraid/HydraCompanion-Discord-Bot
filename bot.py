@@ -65,8 +65,13 @@ async def chests(ctx):
 
 
 @bot.command()
-async def remindme(ctx, time: str, *, reminder: str):
+async def remindme(ctx, time: str, *, reminder: str = None):
     await ctx.message.delete()
+
+    # If user forgets the reminder text
+    if reminder is None:
+        await ctx.send("You need to tell me what to remind you about.\nExample: `$remindme 10m take the bins out`")
+        return
 
     unit = time[-1]
     amount = time[:-1]
