@@ -155,7 +155,7 @@ async def cancelreminder(ctx, reminder_id: int):
 
 @bot.command(name="pull")
 async def should_i_pull(ctx, *, event: str = None):
-    await ctx.message.delete()
+    await ctx.message.delete(delay=15)
 
     # Only allow in one channel
     if ctx.channel.id != PULL_CHANNEL_ID:
@@ -188,6 +188,8 @@ async def should_i_pull(ctx, *, event: str = None):
         color=colour
     )
 
+     embed.add_field(name="Requested by", value=ctx.author.mention, inline=False)
+
     if event:
         embed.add_field(name="Event", value=event, inline=False)
 
@@ -195,4 +197,5 @@ async def should_i_pull(ctx, *, event: str = None):
 
     msg = await ctx.send(embed=embed)
     await msg.delete(delay=15)
+
 bot.run(TOKEN)
