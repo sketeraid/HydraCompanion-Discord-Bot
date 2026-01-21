@@ -107,7 +107,7 @@ async def remindme(ctx, time: str, *, reminder: str = None):
 
     await asyncio.sleep(seconds)
 
-await ctx.send(f"{ctx.author.mention} 🔔 Reminder #{reminder_id}: **{reminder}**")
+    await ctx.send(f"{ctx.author.mention} 🔔 Reminder #{reminder_id}: **{reminder}**")
 
     reminders[user_id] = [r for r in reminders[user_id] if r["id"] != reminder_id]
 
