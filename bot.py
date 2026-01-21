@@ -33,5 +33,15 @@ async def on_ready():
 @bot.command()
 async def test(ctx):
     await ctx.send("Hydra warning test successful.")
-
+@bot.command()
+@bot.command()
+async def chests(ctx):
+    message = (
+        "**Hydra Chest Requirements**\n"
+        "Normal – Over 6.66M\n"
+        "Hard – Over 20.4M\n"
+        "Brutal – Over 29.4M\n"
+        "Nightmare – Over 36.6M"
+    )
+    await ctx.send(message)
 bot.run(TOKEN)
