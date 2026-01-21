@@ -47,7 +47,7 @@ SHARD_RATES = {
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         msg = await ctx.send("Nice try but I am on cooldown :D")
-        return await msg.delete(delay=5)
+        return await msg.delete(delay=30)
     raise error
 
 async def send_weekly_warning():
