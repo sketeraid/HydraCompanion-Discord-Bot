@@ -19,13 +19,19 @@ async def send_weekly_warning():
         await channel.send("24 HOUR WARNING FOR HYDRA CLASH, Don't forget or you'll miss out on rewards!")
 
 @bot.event
+@bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    # Debug: check if the bot can see the channel
     channel = bot.get_channel(CHANNEL_ID)
     print("Channel resolved:", channel)
 
-    scheduler.start()
+    # Start scheduler only once
+    try:
+        scheduler.start()
+    except:
+        pass
+
+    # Add jobs (safe to add even if scheduler is already running)
     scheduler.add_job(
         send_weekly_warning,
         "cron",
@@ -34,7 +40,6 @@ async def on_ready():
         minute=0
     )
 
-    scheduler.start()
     scheduler.add_job(
         send_weekly_warning,
         "cron",
@@ -42,7 +47,6 @@ async def on_ready():
         hour=12,
         minute=0
     )
-
 @bot.command()
 async def test(ctx):
     await ctx.message.delete()
