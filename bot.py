@@ -114,8 +114,8 @@ async def remindme(ctx, time: str, *, reminder: str = None):
     reminders[user_id] = [r for r in reminders[user_id] if r["id"] != reminder_id]
 
 
-@bot.command()
-async def reminders(ctx):
+@bot.command(name="reminders")
+async def list_reminders(ctx):
     await ctx.message.delete()
 
     user_id = ctx.author.id
