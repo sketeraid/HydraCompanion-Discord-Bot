@@ -20,6 +20,18 @@ async def send_weekly_warning():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+    # Debug: check if the bot can see the channel
+    channel = bot.get_channel(CHANNEL_ID)
+    print("Channel resolved:", channel)
+
+    scheduler.start()
+    scheduler.add_job(
+        send_weekly_warning,
+        "cron",
+        day_of_week="tue",
+        hour=8,
+        minute=0
+    )
 
     scheduler.start()
     scheduler.add_job(
