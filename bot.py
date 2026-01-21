@@ -28,4 +28,8 @@ async def on_ready():
         minute=0
     )
 
+@bot.command()
+async def test(ctx):
+    await ctx.send("Hydra warning test successful.")
+
 bot.run(TOKEN)
