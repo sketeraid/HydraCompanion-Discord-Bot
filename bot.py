@@ -9,6 +9,7 @@ reminders = {}
 TOKEN = os.getenv("TOKEN")
 CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 TEST_CHANNEL_ID = int(os.getenv("TESTCHANNEL_ID"))
+PULL_CHANNEL_ID = int(os.getenv("PULL_CHANNEL_ID"))
 
 intents = discord.Intents.default()
 intents.message_content = True
