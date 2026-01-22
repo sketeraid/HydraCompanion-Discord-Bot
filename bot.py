@@ -324,7 +324,7 @@ BASE_RATES = {
 # MERCY CALCULATION FUNCTIONS
 # -----------------------------
 def calc_epic_chance(shard_type, pity):
-if shard_type in ("ancient", "void"):
+    if shard_type in ("ancient", "void"):
     # +2% for every full 20 pulls
     blocks = pity // 20
     return min(100.0, BASE_RATES[shard_type]["epic"] + blocks * 2.0)
@@ -333,7 +333,7 @@ if shard_type == "primal":
     return BASE_RATES["primal"]["epic"]
 
 def calc_legendary_chance(shard_type, pity):
-if shard_type in ("ancient", "void"):
+    if shard_type in ("ancient", "void"):
     # +5% for every full 200 pulls
     blocks = pity // 200
     return min(100.0, BASE_RATES[shard_type]["legendary"] + blocks * 5.0)
@@ -351,7 +351,7 @@ if shard_type == "sacred":
     return BASE_RATES[shard_type]["legendary"]
 
 def calc_mythical_chance(shard_type, pity):
-if shard_type == "primal":
+    if shard_type == "primal":
     # +10% for every full 200 pulls
     blocks = pity // 200
     return min(100.0, BASE_RATES["primal"]["mythical"] + blocks * 10.0)
