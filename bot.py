@@ -610,4 +610,28 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
 
     await ctx.send(msg)
 
+    @bot.command(name="purge")
+@commands.has_permissions(administrator=True)
+async def purge_cmd(ctx, amount: int):
+    # Delete the command message first
+    await ctx.message.delete()
+
+    if amount <= 0:
+        warn = await ctx.send("Please enter a number greater than 0.")
+        return await warn.delete(delay=5)
+
+    # Purge the requested number of messages
+    deleted = await ctx.channel.purge(limit=amount)
+
+    # Confirmation message
+    confirm = await ctx.send(f"Deleted {len(deleted)} messages.")
+    await confirm.delete(delay=5)
+
+
+@purge_cmd.error
+async def purge_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        msg = await ctx.send("Nuh uh, I do not think so, peasant XD")
+        await msg.delete(delay=5)
+
 bot.run(TOKEN)
