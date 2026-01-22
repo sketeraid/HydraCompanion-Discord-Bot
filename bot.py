@@ -325,38 +325,44 @@ BASE_RATES = {
 # -----------------------------
 def calc_epic_chance(shard_type, pity):
     if shard_type in ("ancient", "void"):
-    # +2% for every full 20 pulls
-    blocks = pity // 20
-    return min(100.0, BASE_RATES[shard_type]["epic"] + blocks * 2.0)
+        # +2% for every full 20 pulls
+        blocks = pity // 20
+        return min(100.0, BASE_RATES[shard_type]["epic"] + blocks * 2.0)
 
-if shard_type == "primal":
-    return BASE_RATES["primal"]["epic"]
+    if shard_type == "primal":
+        # Primal epics do NOT scale
+        return BASE_RATES["primal"]["epic"]
+
+    # Sacred has no epic pity
+    return BASE_RATES[shard_type]["epic"]
+
 
 def calc_legendary_chance(shard_type, pity):
     if shard_type in ("ancient", "void"):
-    # +5% for every full 200 pulls
-    blocks = pity // 200
-    return min(100.0, BASE_RATES[shard_type]["legendary"] + blocks * 5.0)
+        # +5% for every full 200 pulls
+        blocks = pity // 200
+        return min(100.0, BASE_RATES[shard_type]["legendary"] + blocks * 5.0)
 
-if shard_type == "primal":
-    # +1% for every full 75 pulls
-    blocks = pity // 75
-    return min(100.0, BASE_RATES["primal"]["legendary"] + blocks * 1.0)
+    if shard_type == "primal":
+        # +1% for every full 75 pulls
+        blocks = pity // 75
+        return min(100.0, BASE_RATES["primal"]["legendary"] + blocks * 1.0)
 
-if shard_type == "sacred":
-    # +2% for every full 12 pulls
-    blocks = pity // 12
-    return min(100.0, BASE_RATES["sacred"]["legendary"] + blocks * 2.0)
+    if shard_type == "sacred":
+        # +2% for every full 12 pulls
+        blocks = pity // 12
+        return min(100.0, BASE_RATES["sacred"]["legendary"] + blocks * 2.0)
 
     return BASE_RATES[shard_type]["legendary"]
 
+
 def calc_mythical_chance(shard_type, pity):
     if shard_type == "primal":
-    # +10% for every full 200 pulls
-    blocks = pity // 200
-    return min(100.0, BASE_RATES["primal"]["mythical"] + blocks * 10.0)
+        # +10% for every full 200 pulls
+        blocks = pity // 200
+        return min(100.0, BASE_RATES["primal"]["mythical"] + blocks * 10.0)
 
-
+    return BASE_RATES[shard_type]["mythical"]
 # -----------------------------
 # DB HELPERS
 # -----------------------------
