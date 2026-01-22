@@ -634,6 +634,5 @@ async def purge_error(ctx, error):
             "Nuh uh, I do not think so, peasant XD\n"
             "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
         )
-        await msg.delete(delay=60)
 
 bot.run(TOKEN)
