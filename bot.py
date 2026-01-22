@@ -611,7 +611,7 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
     await ctx.send(msg)
 
     @bot.command(name="purge")
-@commands.has_permissions(administrator=True)
+    @commands.has_permissions(administrator=True)
 async def purge_cmd(ctx, amount: int):
     # Delete the command message first
     await ctx.message.delete()
