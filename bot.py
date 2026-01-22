@@ -285,10 +285,12 @@ async def gacha_sim(ctx, shard_type: str = None):
     await ctx.send(embed=embed)
 
 # ============================================================
+#                FULL MERCY SYSTEM (FINAL VERSION)
 # ============================================================
-#                FULL MERCY SYSTEM (INTEGRATED)
-# ============================================================
-# ============================================================
+
+import sqlite3
+import discord
+from discord.ext import commands
 
 # -----------------------------
 # DATABASE SETUP
@@ -315,7 +317,7 @@ BASE_RATES = {
     "ancient": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
     "void": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
     "primal": {"epic": 16.0, "legendary": 1.0, "mythical": 0.5},
-    "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}
+    "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}  # Sacred has NO epic pity
 }
 
 # -----------------------------
@@ -379,7 +381,7 @@ def set_mercy_row(user_id, shard_type, epic, legendary, mythical):
     conn.commit()
 
 # -----------------------------
-# MERCY COMMANDS
+# MERCY COMMAND
 # -----------------------------
 @bot.command(name="mercy")
 async def mercy_cmd(ctx, shard_type: str):
@@ -394,14 +396,50 @@ async def mercy_cmd(ctx, shard_type: str):
         color=discord.Color.gold()
     )
 
-    embed.add_field(name="Epic", value=f"Pity: **{epic}**\nChance: **{calc_epic_chance(shard_type, epic):.2f}%**", inline=False)
-    embed.add_field(name="Legendary", value=f"Pity: **{legendary}**\nChance: **{calc_legendary_chance(shard_type, legendary):.2f}%**", inline=False)
+    highest_chance = 0
 
+    # Epic ONLY for Ancient/Void
+    if shard_type in ("ancient", "void"):
+        epic_chance = calc_epic_chance(shard_type, epic)
+        highest_chance = max(highest_chance, epic_chance)
+        embed.add_field(
+            name="Epic",
+            value=f"Pity: **{epic}**\nChance: **{epic_chance:.2f}%**",
+            inline=False
+        )
+
+    # Legendary for all shards
+    legendary_chance = calc_legendary_chance(shard_type, legendary)
+    highest_chance = max(highest_chance, legendary_chance)
+    embed.add_field(
+        name="Legendary",
+        value=f"Pity: **{legendary}**\nChance: **{legendary_chance:.2f}%**",
+        inline=False
+    )
+
+    # Mythical only for Primal
     if shard_type == "primal":
-        embed.add_field(name="Mythical", value=f"Pity: **{mythical}**\nChance: **{calc_mythical_chance(shard_type, mythical):.2f}%**", inline=False)
+        mythical_chance = calc_mythical_chance(shard_type, mythical)
+        highest_chance = max(highest_chance, mythical_chance)
+        embed.add_field(
+            name="Mythical",
+            value=f"Pity: **{mythical}**\nChance: **{mythical_chance:.2f}%**",
+            inline=False
+        )
+
+    # Ready to pull message
+    if highest_chance > 51:
+        embed.add_field(
+            name="🔥 Ready?",
+            value="Looks like you are ready to pull :P",
+            inline=False
+        )
 
     await ctx.send(embed=embed)
 
+# -----------------------------
+# MERCYALL COMMAND
+# -----------------------------
 @bot.command(name="mercyall")
 async def mercy_all_cmd(ctx):
     user = ctx.author.id
@@ -413,18 +451,37 @@ async def mercy_all_cmd(ctx):
     for shard in BASE_RATES.keys():
         epic, legendary, mythical = get_mercy_row(user, shard)
 
-        text = (
-            f"**Epic:** {epic} pulls — {calc_epic_chance(shard, epic):.2f}%\n"
-            f"**Legendary:** {legendary} pulls — {calc_legendary_chance(shard, legendary):.2f}%"
-        )
+        text = ""
+        highest_chance = 0
 
+        # Epic only for Ancient/Void
+        if shard in ("ancient", "void"):
+            epic_chance = calc_epic_chance(shard, epic)
+            highest_chance = max(highest_chance, epic_chance)
+            text += f"**Epic:** {epic} pulls — {epic_chance:.2f}%\n"
+
+        # Legendary for all shards
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        highest_chance = max(highest_chance, legendary_chance)
+        text += f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%"
+
+        # Mythical only for Primal
         if shard == "primal":
-            text += f"\n**Mythical:** {mythical} pulls — {calc_mythical_chance(shard, mythical):.2f}%"
+            mythical_chance = calc_mythical_chance(shard, mythical)
+            highest_chance = max(highest_chance, mythical_chance)
+            text += f"\n**Mythical:** {mythical} pulls — {mythical_chance:.2f}%"
+
+        # Ready to pull message
+        if highest_chance > 51:
+            text += "\n🔥 **Looks like you are ready to pull :P**"
 
         embed.add_field(name=shard.capitalize(), value=text, inline=False)
 
     await ctx.send(embed=embed)
 
+# -----------------------------
+# CLEAR MERCY
+# -----------------------------
 @bot.command(name="clearmercy")
 async def clear_mercy_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -495,6 +552,33 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
         return await ctx.send("Invalid shard type. Use: ancient, void, primal, sacred.")
 
     if amount <= 0:
-        return await ctx.send
+        return await ctx.send("Amount must be a positive number.")
+
+    epic, legendary, mythical = get_mercy_row(ctx.author.id, shard_type)
+
+    # Epic pity only for Ancient/Void
+    if shard_type in ("ancient", "void"):
+        epic += amount
+
+    # Legendary pity for all shards
+    legendary += amount
+
+    # Mythical pity only for Primal
+    if shard_type == "primal":
+        mythical += amount
+
+    set_mercy_row(ctx.author.id, shard_type, epic, legendary, mythical)
+
+    msg = f"{ctx.author.mention}, added **{amount}** pulls to your **{shard_type}** mercy.\n"
+
+    if shard_type in ("ancient", "void"):
+        msg += f"Epic: **{epic}**, "
+
+    msg += f"Legendary: **{legendary}**"
+
+    if shard_type == "primal":
+        msg += f", Mythical: **{mythical}**"
+
+    await ctx.send(msg)
 
 bot.run(TOKEN)
