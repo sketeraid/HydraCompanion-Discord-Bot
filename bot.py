@@ -333,44 +333,56 @@ BASE_RATES = {
 # MERCY CALCULATION FUNCTIONS
 # -----------------------------
 def calc_epic_chance(shard_type, pity):
+    # Ancient & Void: +2% per shard AFTER 20 pulls
     if shard_type in ("ancient", "void"):
-        # +2% for every full 20 pulls
-        blocks = pity // 20
-        return min(100.0, BASE_RATES[shard_type]["epic"] + blocks * 2.0)
+        base = BASE_RATES[shard_type]["epic"]
+        if pity <= 20:
+            return base
+        extra = pity - 20
+        return min(100.0, base + extra * 2.0)
 
-    if shard_type == "primal":
-        # Primal epics do NOT scale
-        return BASE_RATES["primal"]["epic"]
-
-    # Sacred has no epic pity
+    # Primal & Sacred: no epic scaling
     return BASE_RATES[shard_type]["epic"]
 
 
 def calc_legendary_chance(shard_type, pity):
+    # Ancient & Void: +5% per shard AFTER 200 pulls
     if shard_type in ("ancient", "void"):
-        # +5% for every full 200 pulls
-        blocks = pity // 200
-        return min(100.0, BASE_RATES[shard_type]["legendary"] + blocks * 5.0)
+        base = BASE_RATES[shard_type]["legendary"]
+        if pity <= 200:
+            return base
+        extra = pity - 200
+        return min(100.0, base + extra * 5.0)
 
+    # Primal: +1% per shard AFTER 75 pulls
     if shard_type == "primal":
-        # +1% for every full 75 pulls
-        blocks = pity // 75
-        return min(100.0, BASE_RATES["primal"]["legendary"] + blocks * 1.0)
+        base = BASE_RATES["primal"]["legendary"]
+        if pity <= 75:
+            return base
+        extra = pity - 75
+        return min(100.0, base + extra * 1.0)
 
+    # Sacred: +2% per shard AFTER 12 pulls
     if shard_type == "sacred":
-        # +2% for every full 12 pulls
-        blocks = pity // 12
-        return min(100.0, BASE_RATES["sacred"]["legendary"] + blocks * 2.0)
+        base = BASE_RATES["sacred"]["legendary"]
+        if pity <= 12:
+            return base
+        extra = pity - 12
+        return min(100.0, base + extra * 2.0)
 
     return BASE_RATES[shard_type]["legendary"]
 
 
 def calc_mythical_chance(shard_type, pity):
+    # Primal: +10% per shard AFTER 200 pulls
     if shard_type == "primal":
-        # +10% for every full 200 pulls
-        blocks = pity // 200
-        return min(100.0, BASE_RATES["primal"]["mythical"] + blocks * 10.0)
+        base = BASE_RATES["primal"]["mythical"]
+        if pity <= 200:
+            return base
+        extra = pity - 200
+        return min(100.0, base + extra * 10.0)
 
+    # Other shards: no mythical pity
     return BASE_RATES[shard_type]["mythical"]
 # -----------------------------
 # DB HELPERS
