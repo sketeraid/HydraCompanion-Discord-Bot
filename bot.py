@@ -496,3 +496,5 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
 
     if amount <= 0:
         return await ctx.send
+
+bot.run(TOKEN)
