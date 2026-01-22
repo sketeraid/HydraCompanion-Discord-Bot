@@ -627,11 +627,13 @@ async def purge_cmd(ctx, amount: int):
     confirm = await ctx.send(f"Deleted {len(deleted)} messages.")
     await confirm.delete(delay=5)
 
-
 @purge_cmd.error
 async def purge_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        msg = await ctx.send("Nuh uh, I do not think so, peasant XD")
-        await msg.delete(delay=25)
+        msg = await ctx.send(
+            "Nuh uh, I do not think so, peasant XD\n"
+            "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
+        )
+        await msg.delete(delay=60)
 
 bot.run(TOKEN)
