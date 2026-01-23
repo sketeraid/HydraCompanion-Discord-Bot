@@ -641,7 +641,7 @@ async def purge_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
-        @bot.command(name="announce")
+@bot.command(name="announce")
 @commands.has_permissions(administrator=True)
 async def announce_cmd(ctx, *, message: str):
     embed = discord.Embed(
@@ -649,7 +649,12 @@ async def announce_cmd(ctx, *, message: str):
         description=message,
         color=discord.Color.blue()
     )
-    embed.set_footer(text=f"Posted by {ctx.author}", icon_url=ctx.author.avatar.url)
+    
+    embed.set_footer(
+        text=f"Posted by {ctx.author}",
+        icon_url=ctx.author.avatar.url
+    )
+    
     embed.timestamp = discord.utils.utcnow()
 
     await ctx.send(embed=embed)
