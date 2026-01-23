@@ -644,20 +644,22 @@ async def purge_error(ctx, error):
 @bot.command(name="announce")
 @commands.has_permissions(administrator=True)
 async def announce_cmd(ctx, *, message: str):
+    channel = bot.get_channel(1461342242470887546)
+
     embed = discord.Embed(
         title="📢 Announcement",
         description=message,
         color=discord.Color.blue()
     )
-    
+
     embed.set_footer(
         text=f"Posted by {ctx.author}",
         icon_url=ctx.author.avatar.url
     )
-    
+
     embed.timestamp = discord.utils.utcnow()
 
-    await ctx.send(embed=embed)
+    await channel.send(embed=embed)
 
 @announce_cmd.error
 async def announce_error(ctx, error):
