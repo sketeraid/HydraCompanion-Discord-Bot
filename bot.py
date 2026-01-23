@@ -23,11 +23,16 @@ ALLOWED_CHANNEL = 1463963620483530784
 
 @bot.check
 async def globally_block_channels(ctx):
+    # Allow announce command anywhere
+    if ctx.command and ctx.command.name == "announce":
+        return True
+
+    # Everything else must be in the allowed channel
     if ctx.channel.id != ALLOWED_CHANNEL:
         await ctx.send(f"Silly human, these commands can only be used in <#{ALLOWED_CHANNEL}>.")
         return False
-    return True
 
+    return True
 # -----------------------------
 # SHARD RATES (GACHA SIM)
 # -----------------------------
