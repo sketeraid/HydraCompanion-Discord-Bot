@@ -641,11 +641,18 @@ async def purge_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
+ANNOUNCE_CHANNEL_ID = 1461342242470887546
+
 @bot.command(name="announce")
 @commands.has_permissions(administrator=True)
 async def announce_cmd(ctx, *, message: str):
-    channel = bot.get_channel(1461342242470887546)
+    # Delete the admin's command message
+    await ctx.message.delete()
 
+    # Get the announcement channel
+    channel = bot.get_channel(ANNOUNCE_CHANNEL_ID)
+
+    # Build the embed
     embed = discord.Embed(
         title="📢 Announcement",
         description=message,
@@ -659,6 +666,7 @@ async def announce_cmd(ctx, *, message: str):
 
     embed.timestamp = discord.utils.utcnow()
 
+    # Send the announcement to the correct channel
     await channel.send(embed=embed)
 
 @announce_cmd.error
