@@ -627,12 +627,43 @@ async def purge_cmd(ctx, amount: int):
     confirm = await ctx.send(f"Deleted {len(deleted)} messages.")
     await confirm.delete(delay=5)
 
+import random
+
 @purge_cmd.error
 async def purge_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
-        msg = await ctx.send(
-            "Nuh uh, I do not think so, peasant XD\n"
+
+        responses = [
+            "Nuh uh, I do not think so, peasant XD",
             "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
-        )
+        ]
+
+        choice = random.choice(responses)
+        await ctx.send(choice)
+
+        @bot.command(name="announce")
+@commands.has_permissions(administrator=True)
+async def announce_cmd(ctx, *, message: str):
+    embed = discord.Embed(
+        title="📢 Announcement",
+        description=message,
+        color=discord.Color.blue()
+    )
+    embed.set_footer(text=f"Posted by {ctx.author}", icon_url=ctx.author.avatar.url)
+    embed.timestamp = discord.utils.utcnow()
+
+    await ctx.send(embed=embed)
+
+@announce_cmd.error
+async def announce_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+
+        responses = [
+            "Nuh uh, I do not think so, peasant XD",
+            "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
+        ]
+
+        choice = random.choice(responses)
+        await ctx.send(choice)
 
 bot.run(TOKEN)
