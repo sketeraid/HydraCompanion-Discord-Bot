@@ -740,7 +740,7 @@ class MessageMeButton(discord.ui.View):
             )
         except discord.Forbidden:
             await interaction.response.send_message(
-                "I couldn't DM you. Please enable DMs from server members.",
+                "I couldn't DM you! Please enable DMs from server members.",
                 ephemeral=True
             )
 
