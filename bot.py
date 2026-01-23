@@ -20,14 +20,22 @@ bot = commands.Bot(command_prefix="$", intents=intents)
 scheduler = AsyncIOScheduler(timezone="Europe/London")
 
 ALLOWED_CHANNEL = 1463963620483530784
+SUGGEST_BUTTON_CHANNELS = [1463963533640335423, 1463963575780507669]
 
 @bot.check
-async def globally_block_channels(ctx):
-    # Allow announce command anywhere
+async def global_gatekeeper(ctx):
+    # Allow announce anywhere
     if ctx.command and ctx.command.name == "announce":
         return True
 
-    # Everything else must be in the allowed channel
+    # Allow suggestbutton in its own channels
+    if ctx.command and ctx.command.name == "suggestbutton":
+        if ctx.channel.id in SUGGEST_BUTTON_CHANNELS:
+            return True
+        await ctx.send("Silly human, this command can only be used in the suggestion channels.")
+        return False
+
+    # Everything else must be in ALLOWED_CHANNEL
     if ctx.channel.id != ALLOWED_CHANNEL:
         await ctx.send(f"Silly human, these commands can only be used in <#{ALLOWED_CHANNEL}>.")
         return False
