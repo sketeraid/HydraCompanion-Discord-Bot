@@ -686,4 +686,38 @@ async def announce_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
+SUGGESTION_CHANNEL_ID = 1464216800651640893  # replace this
+
+@bot.event
+async def on_message(message):
+    # Ignore bot messages
+    if message.author.bot:
+        return
+
+    # Check if the message is a DM to the bot
+    if isinstance(message.channel, discord.DMChannel):
+        suggestion = message.content
+
+        # Get the suggestion review channel
+        channel = bot.get_channel(SUGGESTION_CHANNEL_ID)
+
+        # Build the anonymous suggestion embed
+        embed = discord.Embed(
+            title="💡 New Anonymous Suggestion (DM)",
+            description=suggestion,
+            color=discord.Color.green()
+        )
+
+        embed.set_footer(text="Anonymous submission")
+
+        # Send the suggestion to the private channel
+        await channel.send(embed=embed)
+
+        # Confirm to the user
+        await message.author.send("Your anonymous suggestion has been submitted.")
+        return
+
+    # Allow normal commands to work
+    await bot.process_commands(message)
+
 bot.run(TOKEN)
