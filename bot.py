@@ -656,7 +656,7 @@ async def purge_error(ctx, error):
 
         responses = [
             "Nuh uh, I do not think so, peasant XD",
-            "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
+            "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMHNjeGQ0YXFuZTVmb3VrbnkzdTZpOGhzcDVrZzlqYjZpemNyYXdyZCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/Ju7l5y9osyymQ/giphy.gif"
         ]
 
         choice = random.choice(responses)
@@ -699,7 +699,7 @@ async def announce_error(ctx, error):
 
         responses = [
             "Nuh uh, I do not think so, peasant XD",
-            "https://media.tenor.com/4ZC0u8T8n5MAAAAC/rickroll.gif"
+            "https://media.giphy.com/media/v1.Y2lkPTc5MGI3NjExMHNjeGQ0YXFuZTVmb3VrbnkzdTZpOGhzcDVrZzlqYjZpemNyYXdyZCZlcD12MV9naWZzX3NlYXJjaCZjdD1n/Ju7l5y9osyymQ/giphy.gif"
         ]
 
         choice = random.choice(responses)
