@@ -720,4 +720,46 @@ async def on_message(message):
     # Allow normal commands to work
     await bot.process_commands(message)
 
+ALLOWED_SUGGEST_BUTTON_CHANNELS = {
+    1463963533640335423,
+    1463963575780507669
+}
+
+class MessageMeButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Message Me", style=discord.ButtonStyle.primary)
+    async def message_me(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.user.send(
+                "Hi! You can send me an anonymous suggestion here anytime."
+            )
+            await interaction.response.send_message(
+                "I've sent you a DM.", ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I couldn't DM you. Please enable DMs from server members.",
+                ephemeral=True
+            )
+
+@bot.command(name="suggestbutton")
+@commands.has_permissions(administrator=True)
+async def suggest_button_cmd(ctx):
+    # Restrict command to the two allowed channels
+    if ctx.channel.id not in ALLOWED_SUGGEST_BUTTON_CHANNELS:
+        return await ctx.send("This command can only be used in approved channels.")
+
+    embed = discord.Embed(
+        title="💡 Anonymous Suggestions",
+        description=(
+            "Want to submit feedback privately?\n"
+            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
+        ),
+        color=discord.Color.green()
+    )
+
+    await ctx.send(embed=embed, view=MessageMeButton())
+
 bot.run(TOKEN)
