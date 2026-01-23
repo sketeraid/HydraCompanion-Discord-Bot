@@ -5,6 +5,7 @@ from discord.ext import commands
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
 import sqlite3
+from datetime import date
 
 reminders = {}
 
@@ -21,6 +22,7 @@ scheduler = AsyncIOScheduler(timezone="Europe/London")
 
 ALLOWED_CHANNEL = 1463963620483530784
 SUGGEST_BUTTON_CHANNELS = [1463963533640335423, 1463963575780507669]
+WORDLE_CHANNEL = 1253815983400030339
 
 @bot.check
 async def global_gatekeeper(ctx):
@@ -35,12 +37,20 @@ async def global_gatekeeper(ctx):
         await ctx.send("Silly human, this command can only be used in the suggestion channels.")
         return False
 
+    # Allow Wordle commands in the Wordle channel
+    if ctx.command and ctx.command.name in ("wordle", "guess", "wordlestats"):
+        if ctx.channel.id == WORDLE_CHANNEL:
+            return True
+        await ctx.send(f"Wordle can only be played in <#{WORDLE_CHANNEL}>.")
+        return False
+
     # Everything else must be in ALLOWED_CHANNEL
     if ctx.channel.id != ALLOWED_CHANNEL:
         await ctx.send(f"Silly human, these commands can only be used in <#{ALLOWED_CHANNEL}>.")
         return False
 
     return True
+
 # -----------------------------
 # SHARD RATES (GACHA SIM)
 # -----------------------------
@@ -310,12 +320,8 @@ async def gacha_sim(ctx, shard_type: str = None):
 #                FULL MERCY SYSTEM (FINAL VERSION)
 # ============================================================
 
-import sqlite3
-import discord
-from discord.ext import commands
-
 # -----------------------------
-# DATABASE SETUP
+# DATABASE SETUP (MERCY)
 # -----------------------------
 conn = sqlite3.connect("mercy.db")
 c = conn.cursor()
@@ -397,8 +403,9 @@ def calc_mythical_chance(shard_type, pity):
 
     # Other shards: no mythical pity
     return BASE_RATES[shard_type]["mythical"]
+
 # -----------------------------
-# DB HELPERS
+# DB HELPERS (MERCY)
 # -----------------------------
 def get_mercy_row(user_id, shard_type):
     shard_type = shard_type.lower()
@@ -623,6 +630,9 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
 
     await ctx.send(msg)
 
+# -----------------------------
+# PURGE COMMAND
+# -----------------------------
 @bot.command(name="purge")
 @commands.has_permissions(administrator=True)
 async def purge_cmd(ctx, amount: int):
@@ -640,8 +650,6 @@ async def purge_cmd(ctx, amount: int):
     confirm = await ctx.send(f"Deleted {len(deleted)} messages.")
     await confirm.delete(delay=5)
 
-import random
-
 @purge_cmd.error
 async def purge_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -654,6 +662,9 @@ async def purge_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
+# -----------------------------
+# ANNOUNCE COMMAND
+# -----------------------------
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
 
 @bot.command(name="announce")
@@ -694,6 +705,9 @@ async def announce_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
+# -----------------------------
+# ANONYMOUS SUGGESTIONS (DM)
+# -----------------------------
 SUGGESTION_CHANNEL_ID = 1464216800651640893  # replace this
 
 @bot.event
@@ -770,4 +784,408 @@ async def suggest_button_cmd(ctx):
 
     await ctx.send(embed=embed, view=MessageMeButton())
 
+# ============================================================
+#                     WORDLE SYSTEM (TIER 4)
+# ============================================================
+
+WORDLE_DB_PATH = "wordle.db"
+WORD_LENGTH = 5
+MAX_GUESSES = 6
+
+# Simple demo word list – you can expand this
+WORD_LIST = [
+    "apple", "brick", "crane", "flame", "ghost",
+    "light", "sound", "track", "world", "pride",
+]
+
+ALLOWED_GUESSES = set(WORD_LIST)
+
+def get_wordle_db():
+    conn_w = sqlite3.connect(WORDLE_DB_PATH)
+    conn_w.row_factory = sqlite3.Row
+    return conn_w
+
+def init_wordle_db():
+    conn_w = get_wordle_db()
+    cur = conn_w.cursor()
+
+    # Per-user stats
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS stats (
+            user_id INTEGER PRIMARY KEY,
+            played INTEGER NOT NULL DEFAULT 0,
+            wins INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            streak INTEGER NOT NULL DEFAULT 0,
+            max_streak INTEGER NOT NULL DEFAULT 0,
+            dist1 INTEGER NOT NULL DEFAULT 0,
+            dist2 INTEGER NOT NULL DEFAULT 0,
+            dist3 INTEGER NOT NULL DEFAULT 0,
+            dist4 INTEGER NOT NULL DEFAULT 0,
+            dist5 INTEGER NOT NULL DEFAULT 0,
+            dist6 INTEGER NOT NULL DEFAULT 0
+        )
+    """)
+
+    # Per-user game for a given day
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS games (
+            user_id INTEGER NOT NULL,
+            game_date TEXT NOT NULL,
+            target_word TEXT NOT NULL,
+            guesses TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'active', -- active, win, loss
+            hard_mode INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, game_date)
+        )
+    """)
+
+    conn_w.commit()
+    conn_w.close()
+
+init_wordle_db()
+
+def get_daily_word_for_date(d: date) -> str:
+    idx = d.toordinal() % len(WORD_LIST)
+    return WORD_LIST[idx]
+
+def today_str():
+    return date.today().isoformat()
+
+def score_guess(guess: str, target: str):
+    result = ['b'] * WORD_LENGTH
+    target_chars = list(target)
+
+    # First pass: greens
+    for i in range(WORD_LENGTH):
+        if guess[i] == target[i]:
+            result[i] = 'g'
+            target_chars[i] = None
+
+    # Second pass: yellows
+    for i in range(WORD_LENGTH):
+        if result[i] == 'g':
+            continue
+        if guess[i] in target_chars:
+            result[i] = 'y'
+            target_chars[target_chars.index(guess[i])] = None
+
+    return result
+
+def markers_to_emoji(markers):
+    mapping = {
+        'g': "🟩",
+        'y': "🟨",
+        'b': "⬛"
+    }
+    return "".join(mapping[m] for m in markers)
+
+def parse_guesses_str(guesses_str: str):
+    if not guesses_str:
+        return []
+    return guesses_str.split(",")
+
+def append_guess(guesses_str: str, guess: str):
+    if not guesses_str:
+        return guess
+    return guesses_str + "," + guess
+
+def get_hard_mode_constraints(guesses, target):
+    greens = {}
+    yellows = set()
+
+    for guess in guesses:
+        markers = score_guess(guess, target)
+        for i, m in enumerate(markers):
+            if m == 'g':
+                greens[i] = guess[i]
+            elif m == 'y':
+                yellows.add(guess[i])
+
+    return greens, yellows
+
+def validate_hard_mode_guess(guess, greens, yellows):
+    for pos, letter in greens.items():
+        if guess[pos] != letter:
+            return False, f"Hard mode: position {pos+1} must be `{letter}`."
+
+    for letter in yellows:
+        if letter not in guess:
+            return False, f"Hard mode: your guess must include `{letter}`."
+
+    return True, None
+
+def get_or_create_wordle_stats(user_id: int):
+    conn_w = get_wordle_db()
+    cur = conn_w.cursor()
+    cur.execute("SELECT * FROM stats WHERE user_id = ?", (user_id,))
+    row = cur.fetchone()
+    if row is None:
+        cur.execute("INSERT INTO stats (user_id) VALUES (?)", (user_id,))
+        conn_w.commit()
+        cur.execute("SELECT * FROM stats WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+    conn_w.close()
+    return row
+
+def update_wordle_stats_after_game(user_id: int, won: bool, guesses_count):
+    conn_w = get_wordle_db()
+    cur = conn_w.cursor()
+    stats = get_or_create_wordle_stats(user_id)
+
+    played = stats["played"] + 1
+    wins = stats["wins"] + (1 if won else 0)
+    losses = stats["losses"] + (0 if won else 1)
+    streak = stats["streak"]
+    max_streak = stats["max_streak"]
+
+    if won:
+        streak += 1
+        if streak > max_streak:
+            max_streak = streak
+    else:
+        streak = 0
+
+    dist1 = stats["dist1"]
+    dist2 = stats["dist2"]
+    dist3 = stats["dist3"]
+    dist4 = stats["dist4"]
+    dist5 = stats["dist5"]
+    dist6 = stats["dist6"]
+
+    if won and guesses_count is not None:
+        if guesses_count == 1:
+            dist1 += 1
+        elif guesses_count == 2:
+            dist2 += 1
+        elif guesses_count == 3:
+            dist3 += 1
+        elif guesses_count == 4:
+            dist4 += 1
+        elif guesses_count == 5:
+            dist5 += 1
+        elif guesses_count == 6:
+            dist6 += 1
+
+    cur.execute("""
+        UPDATE stats SET
+            played = ?,
+            wins = ?,
+            losses = ?,
+            streak = ?,
+            max_streak = ?,
+            dist1 = ?,
+            dist2 = ?,
+            dist3 = ?,
+            dist4 = ?,
+            dist5 = ?,
+            dist6 = ?
+        WHERE user_id = ?
+    """, (
+        played, wins, losses, streak, max_streak,
+        dist1, dist2, dist3, dist4, dist5, dist6,
+        user_id
+    ))
+
+    conn_w.commit()
+    conn_w.close()
+
+@bot.command(name="wordle")
+async def wordle_start(ctx, mode: str = None):
+    """
+    Start today's Wordle.
+    Usage: $wordle [hard]
+    """
+    user_id = ctx.author.id
+    today = today_str()
+    target = get_daily_word_for_date(date.today())
+    hard_mode = (mode is not None and mode.lower() == "hard")
+
+    conn_w = get_wordle_db()
+    cur = conn_w.cursor()
+    cur.execute("SELECT * FROM games WHERE user_id = ? AND game_date = ?", (user_id, today))
+    game = cur.fetchone()
+
+    if game is not None:
+        if game["status"] == "active":
+            await ctx.send("You already have an active game for today. Use `$guess <word>` to continue.")
+        else:
+            await ctx.send("You've already finished today's Wordle. Come back tomorrow!")
+        conn_w.close()
+        return
+
+    cur.execute("""
+        INSERT INTO games (user_id, game_date, target_word, hard_mode)
+        VALUES (?, ?, ?, ?)
+    """, (user_id, today, target, 1 if hard_mode else 0))
+    conn_w.commit()
+    conn_w.close()
+
+    msg = f"Started today's Wordle! Word length: **{WORD_LENGTH}**. You have **{MAX_GUESSES}** guesses.\n"
+    if hard_mode:
+        msg += "Hard mode is **ON**: you must reuse revealed hints correctly.\n"
+    msg += "Use `$guess <word>` to make your first guess."
+    await ctx.send(msg)
+
+@bot.command(name="guess")
+async def wordle_guess(ctx, guess: str):
+    """
+    Make a guess for today's Wordle.
+    Usage: $guess apple
+    """
+    guess = guess.lower()
+    if len(guess) != WORD_LENGTH:
+        await ctx.send(f"Your guess must be {WORD_LENGTH} letters long.")
+        return
+
+    if guess not in ALLOWED_GUESSES:
+        await ctx.send("That word is not in the allowed word list.")
+        return
+
+    user_id = ctx.author.id
+    today = today_str()
+
+    conn_w = get_wordle_db()
+    cur = conn_w.cursor()
+    cur.execute("SELECT * FROM games WHERE user_id = ? AND game_date = ?", (user_id, today))
+    game = cur.fetchone()
+
+    if game is None:
+        await ctx.send("You don't have an active game today. Start one with `$wordle`.")
+        conn_w.close()
+        return
+
+    if game["status"] != "active":
+        await ctx.send("Today's game is already finished. Wait for tomorrow's word!")
+        conn_w.close()
+        return
+
+    target = game["target_word"]
+    guesses_str = game["guesses"]
+    guesses = parse_guesses_str(guesses_str)
+
+    # Hard mode validation
+    if game["hard_mode"]:
+        greens, yellows = get_hard_mode_constraints(guesses, target)
+        ok, reason = validate_hard_mode_guess(guess, greens, yellows)
+        if not ok:
+            await ctx.send(reason)
+            conn_w.close()
+            return
+
+    markers = score_guess(guess, target)
+    emoji_row = markers_to_emoji(markers)
+
+    guesses.append(guess)
+    new_guesses_str = append_guess(guesses_str, guess)
+
+    # Win
+    if guess == target:
+        status = "win"
+        cur.execute("""
+            UPDATE games
+            SET guesses = ?, status = ?
+            WHERE user_id = ? AND game_date = ?
+        """, (new_guesses_str, status, user_id, today))
+        conn_w.commit()
+        conn_w.close()
+
+        grid = []
+        for g in guesses:
+            m = score_guess(g, target)
+            grid.append(markers_to_emoji(m))
+        grid_str = "\n".join(grid)
+
+        await ctx.send(
+            f"{emoji_row}\n\nYou guessed it in **{len(guesses)}** tries! 🎉\n\n{grid_str}"
+        )
+        update_wordle_stats_after_game(user_id, True, len(guesses))
+        return
+
+    # Loss
+    if len(guesses) >= MAX_GUESSES:
+        status = "loss"
+        cur.execute("""
+            UPDATE games
+            SET guesses = ?, status = ?
+            WHERE user_id = ? AND game_date = ?
+        """, (new_guesses_str, status, user_id, today))
+        conn_w.commit()
+        conn_w.close()
+
+        grid = []
+        for g in guesses:
+            m = score_guess(g, target)
+            grid.append(markers_to_emoji(m))
+        grid_str = "\n".join(grid)
+
+        await ctx.send(
+            f"{emoji_row}\n\nNo more guesses left. The word was **{target.upper()}**.\n\n{grid_str}"
+        )
+        update_wordle_stats_after_game(user_id, False, None)
+        return
+
+    # Still active
+    cur.execute("""
+        UPDATE games
+        SET guesses = ?
+        WHERE user_id = ? AND game_date = ?
+    """, (new_guesses_str, user_id, today))
+    conn_w.commit()
+    conn_w.close()
+
+    await ctx.send(
+        f"{emoji_row}\nGuess {len(guesses)}/{MAX_GUESSES}. Keep going!"
+    )
+
+@bot.command(name="wordlestats")
+async def wordle_stats(ctx):
+    """
+    Show your Wordle stats.
+    """
+    user_id = ctx.author.id
+    stats = get_or_create_wordle_stats(user_id)
+
+    played = stats["played"]
+    wins = stats["wins"]
+    losses = stats["losses"]
+    streak = stats["streak"]
+    max_streak = stats["max_streak"]
+
+    if played > 0:
+        win_rate = round((wins / played) * 100, 1)
+    else:
+        win_rate = 0.0
+
+    dist = [
+        stats["dist1"],
+        stats["dist2"],
+        stats["dist3"],
+        stats["dist4"],
+        stats["dist5"],
+        stats["dist6"],
+    ]
+
+    dist_lines = []
+    for i, v in enumerate(dist, start=1):
+        dist_lines.append(f"{i}: {'█' * v} ({v})")
+
+    dist_block = "\n".join(dist_lines) if dist_lines else "No wins yet."
+
+    msg = (
+        f"**Wordle Stats for {ctx.author.display_name}**\n"
+        f"Played: **{played}**\n"
+        f"Wins: **{wins}**\n"
+        f"Losses: **{losses}**\n"
+        f"Win rate: **{win_rate}%**\n"
+        f"Current streak: **{streak}**\n"
+        f"Max streak: **{max_streak}**\n\n"
+        f"**Guess Distribution**\n{dist_block}"
+    )
+
+    await ctx.send(msg)
+
+# -----------------------------
+# RUN BOT
+# -----------------------------
 bot.run(TOKEN)
