@@ -1,7 +1,3 @@
-**Integrating new commands**
-
-Okay, the user wants the full bot code again, including all the changes. I’ll integrate the new commands into the existing mercy section. I’ll add "mercytable" to replace "mercy_all" and keep "mercycompare" as a new command. For "mercytable," I’ll calculate the highest chance for each shard and use emojis for status: 🟢 for "Ready," 🟡 for "Building," and 🔴 for "Low." I’ll also ensure the status thresholds are clear. For "mercycompare," I’ll compare the invoking user and the mentioned user side by side. Let’s make sure everything works smoothly!
-```python
 import os
 import random
 import discord
