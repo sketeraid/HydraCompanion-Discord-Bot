@@ -13,6 +13,7 @@ TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True   # <-- REQUIRED for bot visibility in member list
 
 bot = commands.Bot(command_prefix="$", intents=intents)
 tree = bot.tree
