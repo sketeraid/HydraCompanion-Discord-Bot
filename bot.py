@@ -261,7 +261,7 @@ async def on_command_error(ctx, error):
     raise error
 
 # ============================================================
-#                HYDRA WARNING SCHEDULER
+#                HYDRA & CHIMERA WARNING SCHEDULER
 # ============================================================
 
 async def send_weekly_warning():
@@ -287,6 +287,26 @@ async def send_weekly_warning():
                 "Don't forget or you'll miss out on rewards!"
             )
 
+async def send_chimera_warning():
+    # Same per-guild logic as Hydra, but for Chimera.
+    for guild in bot.guilds:
+        channels = get_guild_channels(guild.id)
+        channel_id = channels["warning_channel_id"]
+
+        if channel_id is None:
+            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
+            if channel and channel.guild.id == guild.id:
+                target_channel = channel
+            else:
+                continue
+        else:
+            target_channel = guild.get_channel(channel_id)
+
+        if target_channel:
+            await target_channel.send(
+                "@everyone 24 HOUR WARNING FOR CHIMERA — fight opens soon!"
+            )
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -300,8 +320,10 @@ async def on_ready():
         pass
 
     # Jobs
-    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=8, minute=0)
-    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=12, minute=0)
+    # Hydra: Tuesday 10:00 UTC
+    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
+    # Chimera: Wednesday 11:00 UTC
+    scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
 
     # Sync slash commands
     try:
@@ -523,6 +545,40 @@ async def gacha_sim(ctx, shard_type: str = None):
 #                MERCY PREFIX COMMANDS
 # ============================================================
 
+def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
+    """
+    Returns (color, ready_flag_bool, status_text_for_table)
+    Ready only if:
+      - Legendary > 74% (all shards)
+      - OR Mythical > 74% (primal only)
+    Epic is ignored for readiness.
+    """
+    # Determine the "relevant" highest chance for status (legendary / mythical)
+    if shard_type == "primal":
+        relevant = max(legendary_chance, mythical_chance or 0.0)
+    else:
+        relevant = legendary_chance
+
+    ready = False
+    if shard_type == "primal":
+        if (mythical_chance is not None and mythical_chance > 74.0) or legendary_chance > 74.0:
+            ready = True
+    else:
+        if legendary_chance > 74.0:
+            ready = True
+
+    if ready:
+        color = discord.Color.green()
+        status = "🟢 **Ready to pull**"
+    elif relevant > 20.0:
+        color = discord.Color.orange()
+        status = "🟡 Building up"
+    else:
+        color = discord.Color.red()
+        status = "🔴 Low mercy"
+
+    return color, ready, status
+
 @bot.command(name="mercy")
 async def mercy_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -536,11 +592,8 @@ async def mercy_cmd(ctx, shard_type: str):
         color=discord.Color.gold()
     )
 
-    highest_chance = 0
-
     if shard_type in ("ancient", "void"):
         epic_chance = calc_epic_chance(shard_type, epic)
-        highest_chance = max(highest_chance, epic_chance)
         embed.add_field(
             name="Epic",
             value=f"Pity: **{epic}**\nChance: **{epic_chance:.2f}%**",
@@ -548,33 +601,29 @@ async def mercy_cmd(ctx, shard_type: str):
         )
 
     legendary_chance = calc_legendary_chance(shard_type, legendary)
-    highest_chance = max(highest_chance, legendary_chance)
     embed.add_field(
         name="Legendary",
         value=f"Pity: **{legendary}**\nChance: **{legendary_chance:.2f}%**",
         inline=False
     )
 
+    mythical_chance = None
     if shard_type == "primal":
         mythical_chance = calc_mythical_chance(shard_type, mythical)
-        highest_chance = max(highest_chance, mythical_chance)
         embed.add_field(
             name="Mythical",
             value=f"Pity: **{mythical}**\nChance: **{mythical_chance:.2f}%**",
             inline=False
         )
 
-    if highest_chance > 51:
-        embed.color = discord.Color.green()
+    color, ready, status = compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance)
+    embed.color = color
+    if ready:
         embed.add_field(
             name="🔥 Ready?",
             value="Looks like you are ready to pull :P",
             inline=False
         )
-    elif highest_chance > 20:
-        embed.color = discord.Color.orange()
-    else:
-        embed.color = discord.Color.red()
 
     await ctx.send(embed=embed)
 
@@ -590,23 +639,22 @@ async def mercy_all_cmd(ctx):
         epic, legendary, mythical = get_mercy_row(user, shard)
 
         text = ""
-        highest_chance = 0
+
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
 
         if shard in ("ancient", "void"):
             epic_chance = calc_epic_chance(shard, epic)
-            highest_chance = max(highest_chance, epic_chance)
             text += f"**Epic:** {epic} pulls — {epic_chance:.2f}%\n"
 
-        legendary_chance = calc_legendary_chance(shard, legendary)
-        highest_chance = max(highest_chance, legendary_chance)
         text += f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%"
 
         if shard == "primal":
             mythical_chance = calc_mythical_chance(shard, mythical)
-            highest_chance = max(highest_chance, mythical_chance)
             text += f"\n**Mythical:** {mythical} pulls — {mythical_chance:.2f}%"
 
-        if highest_chance > 51:
+        _, ready, _ = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
+        if ready:
             text += "\n🔥 **Looks like you are ready to pull :P**"
 
         embed.add_field(name=shard.capitalize(), value=text, inline=False)
@@ -625,33 +673,23 @@ async def mercy_table_cmd(ctx):
     for shard in BASE_RATES.keys():
         epic, legendary, mythical = get_mercy_row(user, shard)
 
-        highest_chance = 0
         lines = []
+
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
 
         if shard in ("ancient", "void"):
             epic_chance = calc_epic_chance(shard, epic)
-            legendary_chance = calc_legendary_chance(shard, legendary)
-            highest_chance = max(epic_chance, legendary_chance)
             lines.append(f"**Epic:** {epic} pulls — {epic_chance:.2f}%")
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
         elif shard == "primal":
-            legendary_chance = calc_legendary_chance(shard, legendary)
             mythical_chance = calc_mythical_chance(shard, mythical)
-            highest_chance = max(legendary_chance, mythical_chance)
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
             lines.append(f"**Mythical:** {mythical} pulls — {mythical_chance:.2f}%")
         else:  # sacred
-            legendary_chance = calc_legendary_chance(shard, legendary)
-            highest_chance = legendary_chance
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
 
-        if highest_chance > 51:
-            status = "🟢 **Ready to pull**"
-        elif highest_chance > 20:
-            status = "🟡 Building up"
-        else:
-            status = "🔴 Low mercy"
-
+        _, _, status = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
         lines.append(f"**Status:** {status}")
 
         embed.add_field(
@@ -1219,7 +1257,7 @@ def build_mercy_guide_embed():
             "• Epic / Legendary / Mythical chances\n"
             "• Current pity\n"
             "• Next block progress\n"
-            "• “Ready to pull” indicator (51%+)"
+            "• “Ready to pull” indicator (74%+ Legendary or Mythical)"
         ),
         inline=False
     )
@@ -1319,11 +1357,8 @@ async def mercy_check(
         color=discord.Color.gold()
     )
 
-    highest_chance = 0
-
     if shard_type in ("ancient", "void"):
         epic_chance = calc_epic_chance(shard_type, epic)
-        highest_chance = max(highest_chance, epic_chance)
         embed.add_field(
             name="Epic",
             value=f"Pity: **{epic}**\nChance: **{epic_chance:.2f}%**",
@@ -1331,33 +1366,29 @@ async def mercy_check(
         )
 
     legendary_chance = calc_legendary_chance(shard_type, legendary)
-    highest_chance = max(highest_chance, legendary_chance)
     embed.add_field(
         name="Legendary",
         value=f"Pity: **{legendary}**\nChance: **{legendary_chance:.2f}%**",
         inline=False
     )
 
+    mythical_chance = None
     if shard_type == "primal":
         mythical_chance = calc_mythical_chance(shard_type, mythical)
-        highest_chance = max(highest_chance, mythical_chance)
         embed.add_field(
             name="Mythical",
             value=f"Pity: **{mythical}**\nChance: **{mythical_chance:.2f}%**",
             inline=False
         )
 
-    if highest_chance > 51:
-        embed.color = discord.Color.green()
+    color, ready, _ = compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance)
+    embed.color = color
+    if ready:
         embed.add_field(
             name="🔥 Ready?",
             value="Looks like you are ready to pull :P",
             inline=False
         )
-    elif highest_chance > 20:
-        embed.color = discord.Color.orange()
-    else:
-        embed.color = discord.Color.red()
 
     await interaction.response.send_message(embed=embed)
 
@@ -1373,33 +1404,23 @@ async def mercy_table_slash(interaction: discord.Interaction):
     for shard in BASE_RATES.keys():
         epic, legendary, mythical = get_mercy_row(user, shard)
 
-        highest_chance = 0
         lines = []
+
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
 
         if shard in ("ancient", "void"):
             epic_chance = calc_epic_chance(shard, epic)
-            legendary_chance = calc_legendary_chance(shard, legendary)
-            highest_chance = max(epic_chance, legendary_chance)
             lines.append(f"**Epic:** {epic} pulls — {epic_chance:.2f}%")
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
         elif shard == "primal":
-            legendary_chance = calc_legendary_chance(shard, legendary)
             mythical_chance = calc_mythical_chance(shard, mythical)
-            highest_chance = max(legendary_chance, mythical_chance)
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
             lines.append(f"**Mythical:** {mythical} pulls — {mythical_chance:.2f}%")
         else:
-            legendary_chance = calc_legendary_chance(shard, legendary)
-            highest_chance = legendary_chance
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
 
-        if highest_chance > 51:
-            status = "🟢 **Ready to pull**"
-        elif highest_chance > 20:
-            status = "🟡 Building up"
-        else:
-            status = "🔴 Low mercy"
-
+        _, _, status = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
         lines.append(f"**Status:** {status}")
 
         embed.add_field(
@@ -1422,23 +1443,22 @@ async def mercy_all_slash(interaction: discord.Interaction):
         epic, legendary, mythical = get_mercy_row(user, shard)
 
         text = ""
-        highest_chance = 0
+
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
 
         if shard in ("ancient", "void"):
             epic_chance = calc_epic_chance(shard, epic)
-            highest_chance = max(highest_chance, epic_chance)
             text += f"**Epic:** {epic} pulls — {epic_chance:.2f}%\n"
 
-        legendary_chance = calc_legendary_chance(shard, legendary)
-        highest_chance = max(highest_chance, legendary_chance)
         text += f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%"
 
         if shard == "primal":
             mythical_chance = calc_mythical_chance(shard, mythical)
-            highest_chance = max(highest_chance, mythical_chance)
             text += f"\n**Mythical:** {mythical} pulls — {mythical_chance:.2f}%"
 
-        if highest_chance > 51:
+        _, ready, _ = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
+        if ready:
             text += "\n🔥 **Looks like you are ready to pull :P**"
 
         embed.add_field(name=shard.capitalize(), value=text, inline=False)
@@ -1465,6 +1485,7 @@ async def mercy_compare_slash(
 
         lines = []
 
+        # User 1
         if shard in ("ancient", "void"):
             e1 = calc_epic_chance(shard, epic1)
             l1 = calc_legendary_chance(shard, legendary1)
@@ -1486,6 +1507,7 @@ async def mercy_compare_slash(
                 f"L:{legendary1} ({l1:.2f}%)"
             )
 
+        # User 2
         if shard in ("ancient", "void"):
             e2 = calc_epic_chance(shard, epic2)
             l2 = calc_legendary_chance(shard, legendary2)
@@ -1877,6 +1899,7 @@ admin_group = app_commands.Group(
 )
 
 @admin_group.command(name="announce", description="Send an announcement to the configured channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(message="Announcement text")
 async def admin_announce_slash(
     interaction: discord.Interaction,
@@ -1907,6 +1930,7 @@ async def admin_announce_slash(
     await interaction.response.send_message("Announcement sent.", ephemeral=True)
 
 @admin_group.command(name="purge", description="Purge a number of messages in this channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(amount="Number of messages to delete")
 async def admin_purge_slash(
     interaction: discord.Interaction,
@@ -1931,6 +1955,7 @@ async def admin_purge_slash(
     )
 
 @admin_group.command(name="suggest-button", description="Post the anonymous suggestion button.")
+@app_commands.default_permissions(administrator=True)
 async def admin_suggest_button_slash(
     interaction: discord.Interaction
 ):
@@ -1962,6 +1987,7 @@ async def admin_suggest_button_slash(
 # -----------------------------
 
 @admin_group.command(name="set-channel-warning", description="Set the Hydra warning channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where Hydra warnings will be posted")
 async def admin_set_channel_warning_slash(
     interaction: discord.Interaction,
@@ -1980,6 +2006,7 @@ async def admin_set_channel_warning_slash(
     )
 
 @admin_group.command(name="set-channel-suggestion", description="Set the suggestion channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where suggestions will be posted")
 async def admin_set_channel_suggestion_slash(
     interaction: discord.Interaction,
@@ -1998,6 +2025,7 @@ async def admin_set_channel_suggestion_slash(
     )
 
 @admin_group.command(name="set-channel-feedback", description="Set the feedback channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where feedback will be posted")
 async def admin_set_channel_feedback_slash(
     interaction: discord.Interaction,
@@ -2016,6 +2044,7 @@ async def admin_set_channel_feedback_slash(
     )
 
 @admin_group.command(name="set-channel-commands", description="Set the commands guide channel.")
+@app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where the commands guide will be posted")
 async def admin_set_channel_commands_slash(
     interaction: discord.Interaction,
@@ -2038,6 +2067,7 @@ async def admin_set_channel_commands_slash(
 # -----------------------------
 
 @admin_group.command(name="commands-guide", description="Post the full commands guide embed.")
+@app_commands.default_permissions(administrator=True)
 async def admin_commands_guide_slash(
     interaction: discord.Interaction
 ):
@@ -2062,6 +2092,7 @@ async def admin_commands_guide_slash(
     )
 
 @admin_group.command(name="mercy-guide", description="Post the mercy tracking guide embed.")
+@app_commands.default_permissions(administrator=True)
 async def admin_mercy_guide_slash(
     interaction: discord.Interaction
 ):
