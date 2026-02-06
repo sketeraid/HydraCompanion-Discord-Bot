@@ -21,6 +21,7 @@ scheduler = AsyncIOScheduler(timezone="Europe/London")
 # -----------------------------
 # CONSTANTS
 # -----------------------------
+# These act as defaults / fallbacks if no per-guild config is set.
 HYDRA_WARNING_CHANNEL_ID = 1461342242470887546
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
 SUGGESTION_CHANNEL_ID = 1464216800651640893
@@ -60,15 +61,15 @@ SHARD_RATES = {
 }
 
 # ============================================================
-#                FULL MERCY SYSTEM (FINAL VERSION)
+#                DATABASE SETUP
 # ============================================================
 
-# -----------------------------
-# DATABASE SETUP (MERCY)
-# -----------------------------
 conn = sqlite3.connect("mercy.db")
 c = conn.cursor()
 
+# -----------------------------
+# MERCY TABLE
+# -----------------------------
 c.execute("""
 CREATE TABLE IF NOT EXISTS mercy (
     user_id TEXT,
@@ -79,6 +80,20 @@ CREATE TABLE IF NOT EXISTS mercy (
     PRIMARY KEY (user_id, shard_type)
 )
 """)
+
+# -----------------------------
+# GUILD CHANNEL SETTINGS TABLE
+# -----------------------------
+c.execute("""
+CREATE TABLE IF NOT EXISTS guild_channels (
+    guild_id TEXT PRIMARY KEY,
+    warning_channel_id INTEGER,
+    suggestion_channel_id INTEGER,
+    feedback_channel_id INTEGER,
+    commands_channel_id INTEGER
+)
+""")
+
 conn.commit()
 
 BASE_RATES = {
@@ -88,9 +103,10 @@ BASE_RATES = {
     "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}
 }
 
-# -----------------------------
-# MERCY CALCULATION FUNCTIONS
-# -----------------------------
+# ============================================================
+#                MERCY CALCULATION FUNCTIONS
+# ============================================================
+
 def calc_epic_chance(shard_type, pity):
     if shard_type in ("ancient", "void"):
         base = BASE_RATES[shard_type]["epic"]
@@ -137,10 +153,10 @@ def calc_mythical_chance(shard_type, pity):
 
     return BASE_RATES[shard_type]["mythical"]
 
+# ============================================================
+#                DB HELPERS (MERCY + GUILD CHANNELS)
+# ============================================================
 
-# -----------------------------
-# DB HELPERS (MERCY)
-# -----------------------------
 def get_mercy_row(user_id, shard_type):
     shard_type = shard_type.lower()
     c.execute(
@@ -171,9 +187,71 @@ def set_mercy_row(user_id, shard_type, epic, legendary, mythical):
     """, (str(user_id), shard_type, epic, legendary, mythical))
     conn.commit()
 
-# -----------------------------
-# COOLDOWN HANDLER
-# -----------------------------
+
+def ensure_guild_row(guild_id: int):
+    c.execute("SELECT guild_id FROM guild_channels WHERE guild_id=?", (str(guild_id),))
+    if c.fetchone() is None:
+        c.execute(
+            "INSERT INTO guild_channels (guild_id) VALUES (?)",
+            (str(guild_id),)
+        )
+        conn.commit()
+
+
+def set_guild_channel(guild_id: int, field: str, channel_id: int):
+    ensure_guild_row(guild_id)
+    if field not in ("warning_channel_id", "suggestion_channel_id", "feedback_channel_id", "commands_channel_id"):
+        return
+    c.execute(
+        f"UPDATE guild_channels SET {field}=? WHERE guild_id=?",
+        (int(channel_id), str(guild_id))
+    )
+    conn.commit()
+
+
+def get_guild_channels(guild_id: int):
+    c.execute("""
+        SELECT warning_channel_id, suggestion_channel_id, feedback_channel_id, commands_channel_id
+        FROM guild_channels
+        WHERE guild_id=?
+    """, (str(guild_id),))
+    row = c.fetchone()
+    if row is None:
+        return {
+            "warning_channel_id": None,
+            "suggestion_channel_id": None,
+            "feedback_channel_id": None,
+            "commands_channel_id": None
+        }
+    return {
+        "warning_channel_id": row[0],
+        "suggestion_channel_id": row[1],
+        "feedback_channel_id": row[2],
+        "commands_channel_id": row[3]
+    }
+
+
+def get_default_suggestion_channel_id():
+    """
+    For the DM-based anonymous suggestion flow.
+    Assumes single main guild; picks the first configured suggestion channel.
+    Falls back to SUGGESTION_CHANNEL_ID constant if none set.
+    """
+    c.execute("""
+        SELECT suggestion_channel_id
+        FROM guild_channels
+        WHERE suggestion_channel_id IS NOT NULL
+        LIMIT 1
+    """)
+    row = c.fetchone()
+    if row and row[0]:
+        return int(row[0])
+    return SUGGESTION_CHANNEL_ID
+
+# ============================================================
+#                COOLDOWN HANDLER
+# ============================================================
+
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
@@ -181,22 +259,38 @@ async def on_command_error(ctx, error):
         return await msg.delete(delay=30)
     raise error
 
-# -----------------------------
-# HYDRA WARNING SCHEDULER
-# -----------------------------
+# ============================================================
+#                HYDRA WARNING SCHEDULER
+# ============================================================
+
 async def send_weekly_warning():
-    channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
-    if channel:
-        await channel.send(
-            "@everyone 24 HOUR WARNING FOR HYDRA CLASH, "
-            "Don't forget or you'll miss out on rewards!"
-        )
+    # Send to each guild's configured warning channel if set,
+    # otherwise fall back to the global HYDRA_WARNING_CHANNEL_ID (if it exists in that guild).
+    for guild in bot.guilds:
+        channels = get_guild_channels(guild.id)
+        channel_id = channels["warning_channel_id"]
+
+        if channel_id is None:
+            # Fallback: try the global constant if it belongs to this guild
+            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
+            if channel and channel.guild.id == guild.id:
+                target_channel = channel
+            else:
+                continue
+        else:
+            target_channel = guild.get_channel(channel_id)
+
+        if target_channel:
+            await target_channel.send(
+                "@everyone 24 HOUR WARNING FOR HYDRA CLASH, "
+                "Don't forget or you'll miss out on rewards!"
+            )
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
-    print("Hydra warning channel resolved:", channel)
+    print("Hydra warning channel resolved (fallback):", channel)
 
     # Start scheduler (ignore if already started)
     try:
@@ -215,9 +309,10 @@ async def on_ready():
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
-# -----------------------------
-# BASIC PREFIX COMMANDS
-# -----------------------------
+# ============================================================
+#                BASIC PREFIX COMMANDS
+# ============================================================
+
 @bot.command()
 async def test(ctx):
     await ctx.message.delete()
@@ -235,9 +330,10 @@ async def chests(ctx):
     await ctx.send(message)
     await ctx.message.delete()
 
-# -----------------------------
-# REMINDER SYSTEM (PREFIX)
-# -----------------------------
+# ============================================================
+#                REMINDER SYSTEM (PREFIX)
+# ============================================================
+
 @bot.command()
 async def remindme(ctx, time: str, *, reminder: str = None):
     await ctx.message.delete()
@@ -322,9 +418,10 @@ async def cancelreminder(ctx, reminder_id: int):
     else:
         await ctx.send(f"❎ Reminder #{reminder_id} cancelled.")
 
-# -----------------------------
-# SHOULD I PULL? (PREFIX)
-# -----------------------------
+# ============================================================
+#                SHOULD I PULL? (PREFIX)
+# ============================================================
+
 @bot.command(name="pull")
 async def should_i_pull(ctx, *, event: str = None):
     await ctx.message.delete(delay=15)
@@ -365,9 +462,10 @@ async def should_i_pull(ctx, *, event: str = None):
 
     await ctx.send(embed=embed)
 
-# -----------------------------
-# GACHA SIMULATOR (PREFIX)
-# -----------------------------
+# ============================================================
+#                GACHA SIMULATOR (PREFIX)
+# ============================================================
+
 def roll_from_rates(rates: dict):
     r = random.uniform(0, 100)
     cumulative = 0
@@ -420,9 +518,10 @@ async def gacha_sim(ctx, shard_type: str = None):
 
     await ctx.send(embed=embed)
 
-# -----------------------------
-# MERCY PREFIX COMMANDS
-# -----------------------------
+# ============================================================
+#                MERCY PREFIX COMMANDS
+# ============================================================
+
 @bot.command(name="mercy")
 async def mercy_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -720,9 +819,10 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
 
     await ctx.send(msg)
 
-# -----------------------------
-# PURGE COMMAND (PREFIX ADMIN)
-# -----------------------------
+# ============================================================
+#                PURGE COMMAND (PREFIX ADMIN)
+# ============================================================
+
 @bot.command(name="purge")
 @commands.has_permissions(administrator=True)
 async def purge_cmd(ctx, amount: int):
@@ -747,9 +847,10 @@ async def purge_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
-# -----------------------------
-# ANNOUNCE COMMAND (PREFIX ADMIN)
-# -----------------------------
+# ============================================================
+#                ANNOUNCE COMMAND (PREFIX ADMIN)
+# ============================================================
+
 @bot.command(name="announce")
 @commands.has_permissions(administrator=True)
 async def announce_cmd(ctx, *, message: str):
@@ -782,9 +883,10 @@ async def announce_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
-# -----------------------------
-# DM SUGGESTION CONFIRMATION VIEW
-# -----------------------------
+# ============================================================
+#                DM SUGGESTION CONFIRMATION VIEW
+# ============================================================
+
 class SuggestionConfirmView(discord.ui.View):
     def __init__(self, user_id, suggestion):
         super().__init__(timeout=120)
@@ -796,7 +898,16 @@ class SuggestionConfirmView(discord.ui.View):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
 
-        channel = interaction.client.get_channel(SUGGESTION_CHANNEL_ID)
+        # Use configured suggestion channel if available (single main guild assumption),
+        # otherwise fall back to SUGGESTION_CHANNEL_ID.
+        suggestion_channel_id = get_default_suggestion_channel_id()
+        channel = interaction.client.get_channel(suggestion_channel_id)
+
+        if not channel:
+            return await interaction.response.edit_message(
+                content="Suggestion channel is not configured correctly.",
+                view=None
+            )
 
         embed = discord.Embed(
             title="💡 New Anonymous Suggestion (DM)",
@@ -821,9 +932,10 @@ class SuggestionConfirmView(discord.ui.View):
             view=None
         )
 
-# -----------------------------
-# ANONYMOUS SUGGESTIONS (DM)
-# -----------------------------
+# ============================================================
+#                ANONYMOUS SUGGESTIONS (DM)
+# ============================================================
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -850,9 +962,10 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# -----------------------------
-# SUGGEST BUTTON COMMAND (PREFIX ADMIN)
-# -----------------------------
+# ============================================================
+#                SUGGEST BUTTON COMMAND (PREFIX ADMIN)
+# ============================================================
+
 class MessageMeButton(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -888,6 +1001,275 @@ async def suggest_button_cmd(ctx):
     )
 
     await ctx.send(embed=embed, view=MessageMeButton())
+
+# ============================================================
+#                NEW PREFIX ADMIN CHANNEL SETTERS
+# ============================================================
+
+@bot.command(name="setchannelwarning")
+@commands.has_permissions(administrator=True)
+async def set_channel_warning_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "warning_channel_id", channel.id)
+    await ctx.send(f"Hydra warning channel set to {channel.mention}.")
+
+@bot.command(name="setchannelsuggestion")
+@commands.has_permissions(administrator=True)
+async def set_channel_suggestion_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "suggestion_channel_id", channel.id)
+    await ctx.send(f"Suggestion channel set to {channel.mention}.")
+
+@bot.command(name="setchannelfeedback")
+@commands.has_permissions(administrator=True)
+async def set_channel_feedback_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "feedback_channel_id", channel.id)
+    await ctx.send(f"Feedback channel set to {channel.mention}.")
+
+@bot.command(name="setchannelcommands")
+@commands.has_permissions(administrator=True)
+async def set_channel_commands_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "commands_channel_id", channel.id)
+    await ctx.send(f"Commands guide channel set to {channel.mention}.")
+
+# ============================================================
+#                COMMAND GUIDE (PREFIX)
+# ============================================================
+
+def build_commands_guide_embed():
+    embed = discord.Embed(
+        title="HYDRABOT — FULL COMMAND GUIDE",
+        color=discord.Color.blurple()
+    )
+
+    embed.add_field(
+        name="GENERAL COMMANDS",
+        value=(
+            "`$test` — Checks if HydraBot is online.\n"
+            "`$chests` — Shows Hydra Clash chest damage requirements."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="ADMIN / UTILITY COMMANDS",
+        value=(
+            "`$announce <message>` — Posts an announcement in the announcement channel.\n"
+            "`$purge <amount>` — Deletes the last X messages. (Admin only)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="ANONYMOUS SUGGESTION SYSTEM",
+        value=(
+            "Click the **Message Me** button to DM the bot.\n"
+            "Type your suggestion → Bot asks for confirmation → Submit anonymously."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="REMINDER SYSTEM",
+        value=(
+            "`$remindme <time> <task>` — Sets a reminder.\n"
+            " Examples: `10m`, `2h`, `1d`\n"
+            "`$reminders` — Shows your active reminders.\n"
+            "`$cancelreminder <id>` — Cancels a reminder."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="SHOULD I PULL?",
+        value=(
+            "`$pull <event>` — Randomised pull advice.\n"
+            "Usable in any channel."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="GACHA SIMULATOR",
+        value=(
+            "`$sim <shard>` — Simulates 10 pulls.\n"
+            "Shard types: `ancient`, `void`, `primal`, `sacred`."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="MERCY TRACKER — MAIN COMMANDS",
+        value=(
+            "`$mercy <shard>` — Shows your pity and current percentages for that shard.\n"
+            "`$mercyall` — Full overview of all shard types.\n"
+            "`$mercytable` — Colour‑coded table of your pity and chances, with readiness indicators.\n"
+            "`$mercycompare @user` — Compare your mercy with another player."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="MERCY TRACKER — MANUAL LOGGING",
+        value=(
+            "Use these after each pull result:\n\n"
+            "`$addepic <shard>` — Logs an Epic pull.\n"
+            "`$addlegendary <shard>` — Logs a Legendary pull.\n"
+            "`$addmythical` — Logs a Mythical pull (Primal only).\n"
+            "`$addpull <shard> <amount>` — Adds raw pulls to pity counters.\n"
+            "`$clearmercy <shard>` — Resets pity for that shard."
+        ),
+        inline=False
+    )
+
+    return embed
+
+@bot.command(name="commands")
+async def commands_prefix(ctx):
+    # Send the commands guide embed to the configured commands channel if set,
+    # otherwise send it in the current channel.
+    if ctx.guild:
+        channels = get_guild_channels(ctx.guild.id)
+        commands_channel_id = channels["commands_channel_id"]
+        if commands_channel_id:
+            channel = ctx.guild.get_channel(commands_channel_id)
+        else:
+            channel = ctx.channel
+    else:
+        channel = ctx.channel
+
+    embed = build_commands_guide_embed()
+    await channel.send(embed=embed)
+
+# ============================================================
+#                MERCY GUIDE (PREFIX ADMIN)
+# ============================================================
+
+def build_mercy_guide_embed():
+    embed = discord.Embed(
+        title="HYDRABOT — MERCY TRACKING GUIDE",
+        color=discord.Color.gold()
+    )
+
+    embed.add_field(
+        name="BEFORE YOU START",
+        value=(
+            "Begin tracking after your last Legendary pull.\n"
+            "This ensures your pity starts at the correct point."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$addpull <shard> <amount>",
+        value=(
+            "Use when you open shards and want to log the number of pulls.\n\n"
+            "**Example:**\n"
+            "`$addpull void 10`\n\n"
+            "**What it does:**\n"
+            "• Increases Epic pity (Ancient/Void only)\n"
+            "• Increases Legendary pity (all shards)\n"
+            "• Increases Mythical pity (Primal only)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$addepic <shard>",
+        value=(
+            "Use when you pull an Epic.\n\n"
+            "**Example:**\n"
+            "`$addepic ancient`\n\n"
+            "**What it does:**\n"
+            "• Resets Epic pity (Ancient/Void only)\n"
+            "• Increases Legendary pity"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$addlegendary <shard>",
+        value=(
+            "Use when you pull a Legendary.\n\n"
+            "**Example:**\n"
+            "`$addlegendary sacred`\n\n"
+            "**What it does:**\n"
+            "• Resets Epic pity\n"
+            "• Resets Legendary pity\n"
+            "• Increases Mythical pity (Primal only)\n\n"
+            "This is the command you use to start tracking after your last Legendary."
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$addmythical primal",
+        value=(
+            "Use when you pull a Mythical.\n\n"
+            "**What it does:**\n"
+            "• Resets ALL Primal pity values"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$mercy <shard>",
+        value=(
+            "Use to check your current pity and chances.\n\n"
+            "**Shows:**\n"
+            "• Epic / Legendary / Mythical chances\n"
+            "• Current pity\n"
+            "• Next block progress\n"
+            "• “Ready to pull” indicator (51%+)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$mercyall",
+        value="Shows all your pity values in one embed.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="$mercytable",
+        value=(
+            "Colour‑coded overview of all shards, including:\n"
+            "• Pity values\n"
+            "• Percentages\n"
+            "• Status indicators (🟢 Ready, 🟡 Building, 🔴 Low)"
+        ),
+        inline=False
+    )
+
+    embed.add_field(
+        name="$mercycompare @user",
+        value="Compare your pity and chances directly with another player.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="$clearmercy <shard>",
+        value="Use only if you want to manually reset pity.",
+        inline=False
+    )
+
+    embed.add_field(
+        name="EXAMPLE WORKFLOW",
+        value=(
+            "Pull a Legendary → `$addlegendary void`\n"
+            "Open 12 shards → `$addpull void 12`\n"
+            "Pull an Epic → `$addepic void`\n"
+            "Check pity → `$mercy void`"
+        ),
+        inline=False
+    )
+
+    return embed
+
+@bot.command(name="mercyguide")
+@commands.has_permissions(administrator=True)
+async def mercy_guide_prefix(ctx):
+    embed = build_mercy_guide_embed()
+    await ctx.send(embed=embed)
 
 # ============================================================
 #                SLASH COMMANDS (GROUPED)
@@ -1575,14 +1957,137 @@ async def admin_suggest_button_slash(
     await interaction.response.send_message(embed=embed, view=MessageMeButton())
 
 # -----------------------------
-# REGISTER GROUPS WITH TREE
+# ADMIN GROUP: CHANNEL SETTERS (SLASH)
 # -----------------------------
+
+@admin_group.command(name="set-channel-warning", description="Set the Hydra warning channel.")
+@app_commands.describe(channel="Channel where Hydra warnings will be posted")
+async def admin_set_channel_warning_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "warning_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Hydra warning channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+@admin_group.command(name="set-channel-suggestion", description="Set the suggestion channel.")
+@app_commands.describe(channel="Channel where suggestions will be posted")
+async def admin_set_channel_suggestion_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "suggestion_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Suggestion channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+@admin_group.command(name="set-channel-feedback", description="Set the feedback channel.")
+@app_commands.describe(channel="Channel where feedback will be posted")
+async def admin_set_channel_feedback_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "feedback_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Feedback channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+@admin_group.command(name="set-channel-commands", description="Set the commands guide channel.")
+@app_commands.describe(channel="Channel where the commands guide will be posted")
+async def admin_set_channel_commands_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "commands_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Commands guide channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+# -----------------------------
+# ADMIN GROUP: COMMANDS GUIDE & MERCY GUIDE (SLASH)
+# -----------------------------
+
+@admin_group.command(name="commands-guide", description="Post the full commands guide embed.")
+async def admin_commands_guide_slash(
+    interaction: discord.Interaction
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    channels = get_guild_channels(interaction.guild.id)
+    commands_channel_id = channels["commands_channel_id"]
+    if commands_channel_id:
+        channel = interaction.guild.get_channel(commands_channel_id)
+    else:
+        channel = interaction.channel
+
+    embed = build_commands_guide_embed()
+    await channel.send(embed=embed)
+    await interaction.response.send_message(
+        "Commands guide posted.",
+        ephemeral=True
+    )
+
+@admin_group.command(name="mercy-guide", description="Post the mercy tracking guide embed.")
+async def admin_mercy_guide_slash(
+    interaction: discord.Interaction
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    embed = build_mercy_guide_embed()
+    await interaction.channel.send(embed=embed)
+    await interaction.response.send_message(
+        "Mercy guide posted.",
+        ephemeral=True
+    )
+
+# ============================================================
+#                REGISTER GROUPS WITH TREE
+# ============================================================
+
 tree.add_command(mercy_group)
 tree.add_command(reminder_group)
 tree.add_command(gacha_group)
 tree.add_command(admin_group)
 
-# -----------------------------
-# RUN BOT
-# -----------------------------
+# ============================================================
+#                RUN BOT
+# ============================================================
+
 bot.run(TOKEN)
