@@ -304,7 +304,8 @@ async def send_chimera_warning():
 
         if target_channel:
             await target_channel.send(
-                "@everyone 24 HOUR WARNING FOR CHIMERA — fight opens soon!"
+                "@everyone 24 HOUR WARNING FOR CHIMERA CLASH, "
+                "Don't forget or you'll miss out on rewards!"
             )
 
 @bot.event
