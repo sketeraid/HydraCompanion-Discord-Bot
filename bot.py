@@ -346,7 +346,7 @@ class CommandsChannelView(SetupBaseView):
         set_guild_channel(self.guild.id, "commands_channel_id", channel.id)
         self.state["commands_channel"] = channel
 
-        # Acknowledge interaction FIRST
+        # Acknowledge FIRST
         await interaction.response.edit_message(
             content=f"Commands Guide channel set to {channel.mention}.",
             view=None
