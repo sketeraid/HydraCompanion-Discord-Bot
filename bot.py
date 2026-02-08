@@ -378,9 +378,32 @@ async def on_ready():
     scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
     scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
 
+    # ============================================================
+    # AUTO CLEANUP OF STALE SLASH COMMANDS (D-2, Z-1)
+    # ============================================================
     try:
-        await tree.sync()
-        print("Slash commands synced.")
+        # Commands defined in this codebase
+        desired_names = {cmd.name for cmd in bot.tree.walk_commands()}
+
+        # Commands currently registered on Discord
+        remote_cmds = await bot.tree.fetch_commands()
+
+        for rc in remote_cmds:
+            if rc.name not in desired_names:
+                try:
+                    await bot.tree.delete_command(rc.id)
+                    print(f"[CLEANUP] Deleted stale command: /{rc.name}")
+                except Exception as e:
+                    print(f"[CLEANUP] Failed to delete /{rc.name}: {e}")
+    except Exception as e:
+        print(f"[CLEANUP] Error during slash command cleanup: {e}")
+
+    # ============================================================
+    # SYNC CLEAN TREE
+    # ============================================================
+    try:
+        await bot.tree.sync()
+        print("Slash commands synced (after cleanup).")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
@@ -2271,6 +2294,38 @@ async def admin_mercy_guide_slash(
     await interaction.channel.send(embed=embed)
     await interaction.response.send_message(
         "Mercy guide posted.",
+        ephemeral=True
+    )
+
+# -----------------------------
+# ADMIN GROUP: DEBUG COMMANDS (SLASH)
+# -----------------------------
+
+@admin_group.command(name="debug-commands", description="List all registered slash commands on Discord.")
+@app_commands.default_permissions(administrator=True)
+async def admin_debug_commands_slash(interaction: discord.Interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    cmds = await interaction.client.tree.fetch_commands()
+
+    if not cmds:
+        return await interaction.response.send_message(
+            "No slash commands are currently registered.",
+            ephemeral=True
+        )
+
+    lines = []
+    for cmd in cmds:
+        lines.append(f"/{cmd.name}  —  ID: `{cmd.id}`")
+
+    output = "\n".join(lines)
+
+    await interaction.response.send_message(
+        f"**Registered Slash Commands:**\n{output}",
         ephemeral=True
     )
 
