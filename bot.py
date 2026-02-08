@@ -940,7 +940,7 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
         msg += f", Mythical: **{mythical}**"
     await ctx.send(msg)
 
-    # ============================================================
+# ============================================================
 #  SECTION 8: PURGE, ANNOUNCE, SUGGESTBUTTON, GUIDES
 # ============================================================
 
@@ -1605,29 +1605,657 @@ async def admin_mercy_guide_slash(interaction):
 async def admin_debug_commands_slash(interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message("No permission.", ephemeral=True)
+# ============================================================
+#  SECTION 9: SLASH COMMANDS
+# ============================================================
+
+async def shard_autocomplete(interaction, current):
+    current = current.lower()
+    return [
+        app_commands.Choice(name=s.capitalize(), value=s)
+        for s in SHARD_CHOICES if current in s
+    ]
+
+# ============================================================
+#  MERCY SLASH COMMANDS
+# ============================================================
+
+mercy_group = app_commands.Group(
+    name="mercy",
+    description="View and manage your shard mercy counters."
+)
+
+@mercy_group.command(
+    name="check",
+    description="Show your mercy status and pull chances for a specific shard."
+)
+@app_commands.describe(shard_type="Shard type to check.")
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def mercy_check(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type not in BASE_RATES:
+        return await interaction.response.send_message("Invalid shard type.", ephemeral=True)
+
+    epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
+
+    embed = discord.Embed(
+        title=f"{shard_type.capitalize()} Mercy Status",
+        color=discord.Color.gold()
+    )
+
+    if shard_type in ("ancient", "void"):
+        epic_chance = calc_epic_chance(shard_type, epic)
+        embed.add_field(name="Epic", value=f"Pity: {epic}\nChance: {epic_chance:.2f}%", inline=False)
+
+    legendary_chance = calc_legendary_chance(shard_type, legendary)
+    embed.add_field(name="Legendary", value=f"Pity: {legendary}\nChance: {legendary_chance:.2f}%", inline=False)
+
+    mythical_chance = None
+    if shard_type == "primal":
+        mythical_chance = calc_mythical_chance(shard_type, mythical)
+        embed.add_field(name="Mythical", value=f"Pity: {mythical}\nChance: {mythical_chance:.2f}%", inline=False)
+
+    color, ready, _ = compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance)
+    embed.color = color
+
+    if ready:
+        embed.add_field(name="🔥 Ready?", value="Looks like you are ready to pull :P", inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+@mercy_group.command(
+    name="table",
+    description="Display a detailed mercy table for all shard types."
+)
+async def mercy_table_slash(interaction):
+    user = interaction.user.id
+    embed = discord.Embed(
+        title=f"{interaction.user.display_name}'s Mercy Table",
+        color=discord.Color.gold()
+    )
+
+    for shard in BASE_RATES:
+        epic, legendary, mythical = get_mercy_row(user, shard)
+        lines = []
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
+
+        if shard in ("ancient", "void"):
+            epic_chance = calc_epic_chance(shard, epic)
+            lines.append(f"**Epic:** {epic} pulls — {epic_chance:.2f}%")
+            lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
+
+        elif shard == "primal":
+            mythical_chance = calc_mythical_chance(shard, mythical)
+            lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
+            lines.append(f"**Mythical:** {mythical} pulls — {mythical_chance:.2f}%")
+
+        else:
+            lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
+
+        _, _, status = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
+        lines.append(f"**Status:** {status}")
+
+        embed.add_field(name=shard.capitalize(), value="\n".join(lines), inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+@mercy_group.command(
+    name="all",
+    description="Show a full overview of all your mercy counters."
+)
+async def mercy_all_slash(interaction):
+    user = interaction.user.id
+    embed = discord.Embed(
+        title=f"{interaction.user.display_name}'s Full Mercy Overview",
+        color=discord.Color.blue()
+    )
+
+    for shard in BASE_RATES:
+        epic, legendary, mythical = get_mercy_row(user, shard)
+        text = ""
+        legendary_chance = calc_legendary_chance(shard, legendary)
+        mythical_chance = None
+
+        if shard in ("ancient", "void"):
+            epic_chance = calc_epic_chance(shard, epic)
+            text += f"**Epic:** {epic} pulls — {epic_chance:.2f}%\n"
+
+        text += f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%"
+
+        if shard == "primal":
+            mythical_chance = calc_mythical_chance(shard, mythical)
+            text += f"\n**Mythical:** {mythical} pulls — {mythical_chance:.2f}%"
+
+        _, ready, _ = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
+        if ready:
+            text += "\n🔥 **Looks like you are ready to pull :P**"
+
+        embed.add_field(name=shard.capitalize(), value=text, inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+@mercy_group.command(
+    name="compare",
+    description="Compare your mercy counters with another user."
+)
+@app_commands.describe(member="User to compare with.")
+async def mercy_compare_slash(interaction, member: discord.Member):
+    user1 = interaction.user
+    user2 = member
+
+    embed = discord.Embed(
+        title=f"Mercy Comparison: {user1.display_name} vs {user2.display_name}",
+        color=discord.Color.purple()
+    )
+
+    for shard in BASE_RATES:
+        epic1, legendary1, mythical1 = get_mercy_row(user1.id, shard)
+        epic2, legendary2, mythical2 = get_mercy_row(user2.id, shard)
+
+        lines = []
+
+        if shard in ("ancient", "void"):
+            e1 = calc_epic_chance(shard, epic1)
+            l1 = calc_legendary_chance(shard, legendary1)
+            lines.append(f"**{user1.display_name}:** E:{epic1} ({e1:.2f}%)  L:{legendary1} ({l1:.2f}%)")
+        elif shard == "primal":
+            l1 = calc_legendary_chance(shard, legendary1)
+            m1 = calc_mythical_chance(shard, mythical1)
+            lines.append(f"**{user1.display_name}:** L:{legendary1} ({l1:.2f}%)  M:{mythical1} ({m1:.2f}%)")
+        else:
+            l1 = calc_legendary_chance(shard, legendary1)
+            lines.append(f"**{user1.display_name}:** L:{legendary1} ({l1:.2f}%)")
+
+        if shard in ("ancient", "void"):
+            e2 = calc_epic_chance(shard, epic2)
+            l2 = calc_legendary_chance(shard, legendary2)
+            lines.append(f"**{user2.display_name}:** E:{epic2} ({e2:.2f}%)  L:{legendary2} ({l2:.2f}%)")
+        elif shard == "primal":
+            l2 = calc_legendary_chance(shard, legendary2)
+            m2 = calc_mythical_chance(shard, mythical2)
+            lines.append(f"**{user2.display_name}:** L:{legendary2} ({l2:.2f}%)  M:{mythical2} ({m2:.2f}%)")
+        else:
+            l2 = calc_legendary_chance(shard, legendary2)
+            lines.append(f"**{user2.display_name}:** L:{legendary2} ({l2:.2f}%)")
+
+        embed.add_field(name=shard.capitalize(), value="\n".join(lines), inline=False)
+
+    await interaction.response.send_message(embed=embed)
+
+@mercy_group.command(
+    name="add-pull",
+    description="Add raw pulls to your mercy counters."
+)
+@app_commands.describe(shard_type="Shard type to update.", amount="Number of pulls to add.")
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def mercy_add_pull_slash(interaction, shard_type: str, amount: int):
+    shard_type = shard_type.lower()
+    if shard_type not in BASE_RATES:
+        return await interaction.response.send_message("Invalid shard type.", ephemeral=True)
+    if amount <= 0:
+        return await interaction.response.send_message("Amount must be positive.", ephemeral=True)
+
+    epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
+
+    if shard_type in ("ancient", "void"):
+        epic += amount
+    legendary += amount
+    if shard_type == "primal":
+        mythical += amount
+
+    set_mercy_row(interaction.user.id, shard_type, epic, legendary, mythical)
+
+    msg = f"Added **{amount}** pulls to **{shard_type}**.\n"
+    if shard_type in ("ancient", "void"):
+        msg += f"Epic: {epic}, "
+    msg += f"Legendary: {legendary}"
+    if shard_type == "primal":
+        msg += f", Mythical: {mythical}"
+
+    await interaction.response.send_message(msg)
+
+@mercy_group.command(
+    name="add-epic",
+    description="Record an Epic pull and update mercy accordingly."
+)
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def mercy_add_epic_slash(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type not in BASE_RATES:
+        return await interaction.response.send_message("Invalid shard type.", ephemeral=True)
+
+    epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
+
+    epic = 0
+    legendary += 1
+    if shard_type == "primal":
+        mythical += 1
+
+    set_mercy_row(interaction.user.id, shard_type, epic, legendary, mythical)
+
+    await interaction.response.send_message(f"Epic recorded for {shard_type}.")
+
+@mercy_group.command(
+    name="add-legendary",
+    description="Record a Legendary pull and reset mercy counters."
+)
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def mercy_add_legendary_slash(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type not in BASE_RATES:
+        return await interaction.response.send_message("Invalid shard type.", ephemeral=True)
+
+    epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
+
+    epic = 0
+    legendary = 0
+    if shard_type == "primal":
+        mythical += 1
+
+    set_mercy_row(interaction.user.id, shard_type, epic, legendary, mythical)
+
+    await interaction.response.send_message(f"Legendary recorded for {shard_type}.")
+
+@mercy_group.command(
+    name="add-mythical",
+    description="Record a Mythical pull for primal shards."
+)
+@app_commands.describe(shard_type="Must be 'primal'.")
+async def mercy_add_mythical_slash(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type != "primal":
+        return await interaction.response.send_message("Only primal shards can pull mythical.", ephemeral=True)
+
+    epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
+
+    epic = 0
+    legendary = 0
+    mythical = 0
+
+    set_mercy_row(interaction.user.id, shard_type, epic, legendary, mythical)
+
+    await interaction.response.send_message("Mythical recorded for primal.")
+
+@mercy_group.command(
+    name="clear",
+    description="Reset your mercy counters for a specific shard."
+)
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def mercy_clear_slash(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type not in BASE_RATES:
+        return await interaction.response.send_message("Invalid shard type.", ephemeral=True)
+
+    set_mercy_row(interaction.user.id, shard_type, 0, 0, 0)
+
+    await interaction.response.send_message(f"Your {shard_type} mercy has been reset.")
+
+# ============================================================
+#  REMINDER SLASH COMMANDS
+# ============================================================
+
+reminder_group = app_commands.Group(
+    name="reminder",
+    description="Set and manage personal reminders."
+)
+
+@reminder_group.command(
+    name="set",
+    description="Create a reminder for a future time."
+)
+@app_commands.describe(time="Format: 10m, 2h, 1d", reminder="Reminder text.")
+async def reminder_set(interaction, time: str, reminder: str):
+    unit = time[-1]
+    amount = time[:-1]
+
+    if not amount.isdigit():
+        return await interaction.response.send_message(
+            "Time must be a number followed by m/h/d.",
+            ephemeral=True
+        )
+
+    amount = int(amount)
+
+    if unit == "m":
+        seconds = amount * 60
+    elif unit == "h":
+        seconds = amount * 3600
+    elif unit == "d":
+        seconds = amount * 86400
+    else:
+        return await interaction.response.send_message(
+            "Invalid time unit. Use m, h, or d.",
+            ephemeral=True
+        )
+
+    user_id = interaction.user.id
+    reminders.setdefault(user_id, [])
+
+    reminder_id = len(reminders[user_id]) + 1
+    reminders[user_id].append({"id": reminder_id, "text": reminder, "time": time})
+
+    await interaction.response.send_message(
+        f"⏰ Reminder **#{reminder_id}** set for **{time}**.",
+        ephemeral=True
+    )
+
+    async def reminder_task():
+        await asyncio.sleep(seconds)
+        try:
+            await interaction.channel.send(
+                f"{interaction.user.mention} 🔔 Reminder #{reminder_id}: **{reminder}**"
+            )
+        finally:
+            reminders[user_id] = [
+                r for r in reminders[user_id] if r["id"] != reminder_id
+            ]
+
+    bot.loop.create_task(reminder_task())
+
+@reminder_group.command(
+    name="list",
+    description="View all active reminders."
+)
+async def reminder_list_slash(interaction):
+    user_id = interaction.user.id
+
+    if user_id not in reminders or not reminders[user_id]:
+        return await interaction.response.send_message(
+            "You have no active reminders.",
+            ephemeral=True
+        )
+
+    msg = "**Your Active Reminders:**\n"
+    for r in reminders[user_id]:
+        msg += f"• #{r['id']} – {r['text']} (in {r['time']})\n"
+
+    await interaction.response.send_message(msg, ephemeral=True)
+
+@reminder_group.command(
+    name="cancel",
+    description="Cancel one of your active reminders."
+)
+@app_commands.describe(reminder_id="Reminder ID to cancel.")
+async def reminder_cancel_slash(interaction, reminder_id: int):
+    user_id = interaction.user.id
+
+    if user_id not in reminders or not reminders[user_id]:
+        return await interaction.response.send_message(
+            "You have no reminders to cancel.",
+            ephemeral=True
+        )
+
+    before = len(reminders[user_id])
+    reminders[user_id] = [r for r in reminders[user_id] if r["id"] != reminder_id]
+    after = len(reminders[user_id])
+
+    if before == after:
+        await interaction.response.send_message(
+            f"No reminder found with ID #{reminder_id}.",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❎ Reminder #{reminder_id} cancelled.",
+            ephemeral=True
+        )
+
+# ============================================================
+#  GACHA SLASH COMMANDS
+# ============================================================
+
+gacha_group = app_commands.Group(
+    name="gacha",
+    description="Simulate shard pulls and get pull advice."
+)
+
+@gacha_group.command(
+    name="simulate",
+    description="Simulate 10 shard pulls for a chosen shard type."
+)
+@app_commands.describe(shard_type="Shard type to simulate.")
+@app_commands.autocomplete(shard_type=shard_autocomplete)
+async def gacha_simulate_slash(interaction, shard_type: str):
+    shard_type = shard_type.lower()
+    if shard_type not in SHARD_RATES:
+        return await interaction.response.send_message(
+            "Invalid shard type.",
+            ephemeral=True
+        )
+
+    rates = SHARD_RATES[shard_type]
+    results = [roll_from_rates(rates) for _ in range(10)]
+
+    summary = {}
+    for rarity in results:
+        summary[rarity] = summary.get(rarity, 0) + 1
+
+    embed = discord.Embed(
+        title=f"🎰 {shard_type.capitalize()} Shard — 10 Pulls",
+        color=discord.Color.gold()
+    )
+    embed.add_field(name="Results", value="\n".join(results), inline=False)
+    embed.add_field(
+        name="Summary",
+        value="\n".join([f"{rarity}: **{count}**" for rarity, count in summary.items()]),
+        inline=False
+    )
+    embed.add_field(name="Requested by", value=interaction.user.mention, inline=False)
+    embed.set_footer(text="HydraBot Simulator")
+
+    await interaction.response.send_message(embed=embed)
+
+@gacha_group.command(
+    name="pull-advice",
+    description="Get advice on whether you should pull right now."
+)
+@app_commands.describe(event="Optional event or banner name.")
+async def gacha_pull_advice_slash(interaction, event: str | None = None):
+    yes = [
+        "Yes — send it.",
+        "Absolutely. This shard is calling your name.",
+        "Yep. You will regret skipping more than pulling."
+    ]
+    no = [
+        "No — save your resources.",
+        "Skip. This shard is not worth it.",
+        "Not this one. Your future self will thank you."
+    ]
+
+        decision = random.choice(["yes", "no"])
+    answer = random.choice(yes if decision == "yes" else no)
+    colour = discord.Color.green() if decision == "yes" else discord.Color.red()
+
+    embed = discord.Embed(
+        title="🎲 Should you pull?",
+        description=answer,
+        color=colour
+    )
+    embed.add_field(name="Requested by", value=interaction.user.mention, inline=False)
+
+    if event:
+        embed.add_field(name="Event", value=event, inline=False)
+
+    embed.set_footer(text="Decision generated by HydraBot RNG")
+
+    await interaction.response.send_message(embed=embed)
+
+    # ============================================================
+#  ADMIN SLASH COMMANDS
+# ============================================================
+
+admin_group = app_commands.Group(
+    name="admin",
+    description="Administrative tools for server management.",
+    default_permissions=discord.Permissions(administrator=True)
+)
+
+@admin_group.command(
+    name="announce",
+    description="Post an announcement to the configured announcement channel."
+)
+@app_commands.describe(message="The announcement text.")
+async def admin_announce_slash(interaction, message: str):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission.",
+            ephemeral=True
+        )
+
+    channel = interaction.client.get_channel(ANNOUNCE_CHANNEL_ID)
+
+    embed = discord.Embed(
+        title="📢 Announcement",
+        description=message,
+        color=discord.Color.blue()
+    )
+    embed.set_footer(
+        text=f"Posted by {interaction.user}",
+        icon_url=interaction.user.avatar.url if interaction.user.avatar else None
+    )
+    embed.timestamp = discord.utils.utcnow()
+
+    await channel.send(embed=embed)
+    await interaction.response.send_message("Announcement sent.", ephemeral=True)
+
+
+@admin_group.command(
+    name="purge",
+    description="Delete a number of messages from the current channel."
+)
+@app_commands.describe(amount="Number of messages to delete.")
+async def admin_purge_slash(interaction, amount: int):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission.",
+            ephemeral=True
+        )
+
+    if amount <= 0:
+        return await interaction.response.send_message(
+            "Enter a number greater than 0.",
+            ephemeral=True
+        )
+
+    deleted = await interaction.channel.purge(limit=amount)
+    await interaction.response.send_message(
+        f"Deleted {len(deleted)} messages.",
+        ephemeral=True
+    )
+
+
+@admin_group.command(
+    name="suggest-button",
+    description="Post the anonymous suggestion button in the current channel."
+)
+async def admin_suggest_button_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission.",
+            ephemeral=True
+        )
+
+    if interaction.channel.id not in ALLOWED_SUGGEST_BUTTON_CHANNELS:
+        return await interaction.response.send_message(
+            "This channel is not approved.",
+            ephemeral=True
+        )
+
+    embed = discord.Embed(
+        title="💡 Anonymous Suggestions",
+        description=(
+            "Want to submit feedback privately?\n"
+            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
+        ),
+        color=discord.Color.green()
+    )
+
+    await interaction.response.send_message(embed=embed, view=MessageMeButton())
+
+
+@admin_group.command(
+    name="setup",
+    description="Start the HydraBot setup wizard."
+)
+async def admin_setup_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission.",
+            ephemeral=True
+        )
+
+    state = {}
+    await start_commands_step(interaction, state)
+
+
+@admin_group.command(
+    name="commands-guide",
+    description="Post the full commands guide in the configured channel."
+)
+async def admin_commands_guide_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("No permission.", ephemeral=True)
+
+    channels = get_guild_channels(interaction.guild.id)
+    commands_channel_id = channels["commands_channel_id"]
+    channel = interaction.guild.get_channel(commands_channel_id) if commands_channel_id else interaction.channel
+
+    await channel.send(embed=build_commands_guide_embed())
+    await interaction.response.send_message("Commands guide posted.", ephemeral=True)
+
+
+@admin_group.command(
+    name="mercy-guide",
+    description="Post the mercy tracking guide in the current channel."
+)
+async def admin_mercy_guide_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("No permission.", ephemeral=True)
+
+    await interaction.channel.send(embed=build_mercy_guide_embed())
+    await interaction.response.send_message("Mercy guide posted.", ephemeral=True)
+
+
+@admin_group.command(
+    name="debug-commands",
+    description="List all registered slash commands for debugging."
+)
+async def admin_debug_commands_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("No permission.", ephemeral=True)
 
     cmds = await interaction.client.tree.fetch_commands()
+
     if not cmds:
         return await interaction.response.send_message("No slash commands registered.", ephemeral=True)
 
     lines = [f"/{cmd.name} — ID: `{cmd.id}`" for cmd in cmds]
+
     await interaction.response.send_message(
         "**Registered Slash Commands:**\n" + "\n".join(lines),
         ephemeral=True
     )
 
-# ============================================================
+    # ============================================================
 #  SUPPORT & DEVELOPER SLASH COMMANDS
 # ============================================================
 
-@tree.command(name="support")
+@tree.command(
+    name="support",
+    description="Show the Hydra Companion support server link."
+)
 async def support_slash(interaction):
     await interaction.response.send_message(
         "**Support Server**\n"
         "https://discord.gg/DuemMm57jr"
     )
 
-@tree.command(name="developer")
+
+@tree.command(
+    name="developer",
+    description="Show Hydra Companion developer resources and GitHub links."
+)
 async def developer_slash(interaction):
     await interaction.response.send_message(
         "**Hydra Companion Developer Resources**\n\n"
@@ -1637,7 +2265,7 @@ async def developer_slash(interaction):
         "**Android App:** https://github.com/sketeraid/HydraCompanionAndroidAPK"
     )
 
-# ============================================================
+    # ============================================================
 #  REGISTER GROUPS & RUN BOT
 # ============================================================
 
