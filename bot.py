@@ -1284,8 +1284,8 @@ reminder_group = app_commands.Group(
 @reminder_group.command(name="set")
 @app_commands.describe(time="10m, 2h, 1d", reminder="Reminder text")
 async def reminder_set(interaction, time: str, reminder: str):
-        unit = time[-1]
-        amount = time[:-1]
+    unit = time[-1]
+    amount = time[:-1]
 
     if not amount.isdigit():
         return await interaction.response.send_message(
