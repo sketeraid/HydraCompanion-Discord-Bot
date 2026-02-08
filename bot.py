@@ -28,6 +28,12 @@ scheduler = AsyncIOScheduler(timezone="Europe/London")
 # -----------------------------
 HYDRA_WARNING_CHANNEL_ID = 1461342242470887546
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
+SUGGESTION_CHANNEL_ID = 1464216800651640893  # legacy fallback
+
+ALLOWED_SUGGEST_BUTTON_CHANNELS = {
+    1463963533640335423,
+    1463963575780507669
+}
 
 SHARD_CHOICES = ["ancient", "void", "primal", "sacred"]
 
@@ -95,9 +101,18 @@ CREATE TABLE IF NOT EXISTS guild_channels (
     warning_channel_id INTEGER,
     suggestion_channel_id INTEGER,
     feedback_channel_id INTEGER,
-    commands_channel_id INTEGER
+    commands_channel_id INTEGER,
+    mercy_channel_id INTEGER
 )
 """)
+
+# In case the table existed before mercy_channel_id was added
+try:
+    c.execute("ALTER TABLE guild_channels ADD COLUMN mercy_channel_id INTEGER")
+    conn.commit()
+except sqlite3.OperationalError:
+    # Column already exists or table just created with it
+    pass
 
 conn.commit()
 
@@ -136,7 +151,6 @@ def calc_legendary_chance(shard_type, pity):
         if pity <= 12:
             return base
         extra = pity - 12
-            # noqa
         return min(100.0, base + extra * 2.0)
 
     return BASE_RATES[shard_type]["legendary"]
@@ -197,21 +211,30 @@ def ensure_guild_row(guild_id: int):
         conn.commit()
 
 
-def set_guild_channel(guild_id: int, field: str, channel_id: int | None):
+def set_guild_channel(guild_id: int, field: str, channel_id: int):
     ensure_guild_row(guild_id)
-    if field not in ("warning_channel_id", "suggestion_channel_id", "feedback_channel_id", "commands_channel_id"):
+    if field not in (
+        "warning_channel_id",
+        "suggestion_channel_id",
+        "feedback_channel_id",
+        "commands_channel_id",
+        "mercy_channel_id"
+    ):
         return
-    # channel_id can be None, 0 (Not Required), or a real channel ID
     c.execute(
         f"UPDATE guild_channels SET {field}=? WHERE guild_id=?",
-        (channel_id, str(guild_id))
+        (int(channel_id), str(guild_id))
     )
     conn.commit()
 
 
 def get_guild_channels(guild_id: int):
     c.execute("""
-        SELECT warning_channel_id, suggestion_channel_id, feedback_channel_id, commands_channel_id
+        SELECT warning_channel_id,
+               suggestion_channel_id,
+               feedback_channel_id,
+               commands_channel_id,
+               mercy_channel_id
         FROM guild_channels
         WHERE guild_id=?
     """, (str(guild_id),))
@@ -221,32 +244,34 @@ def get_guild_channels(guild_id: int):
             "warning_channel_id": None,
             "suggestion_channel_id": None,
             "feedback_channel_id": None,
-            "commands_channel_id": None
+            "commands_channel_id": None,
+            "mercy_channel_id": None
         }
     return {
         "warning_channel_id": row[0],
         "suggestion_channel_id": row[1],
         "feedback_channel_id": row[2],
-        "commands_channel_id": row[3]
+        "commands_channel_id": row[3],
+        "mercy_channel_id": row[4]
     }
 
 
-def get_default_suggestion_channel_id():
+def get_default_feedback_channel_id():
     """
     For the DM-based anonymous suggestion flow.
-    Assumes single main guild; picks the first configured suggestion channel.
-    Returns None if none configured.
+    Picks the first configured feedback channel.
+    Falls back to SUGGESTION_CHANNEL_ID constant if none set.
     """
     c.execute("""
-        SELECT suggestion_channel_id
+        SELECT feedback_channel_id
         FROM guild_channels
-        WHERE suggestion_channel_id IS NOT NULL AND suggestion_channel_id != 0
+        WHERE feedback_channel_id IS NOT NULL
         LIMIT 1
     """)
     row = c.fetchone()
     if row and row[0]:
         return int(row[0])
-    return None
+    return SUGGESTION_CHANNEL_ID
 
 
 def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
@@ -305,9 +330,6 @@ async def send_weekly_warning():
                 target_channel = channel
             else:
                 continue
-        elif channel_id == 0:
-            # Not Required → skip
-            continue
         else:
             target_channel = guild.get_channel(channel_id)
 
@@ -329,9 +351,6 @@ async def send_chimera_warning():
                 target_channel = channel
             else:
                 continue
-        elif channel_id == 0:
-            # Not Required → skip
-            continue
         else:
             target_channel = guild.get_channel(channel_id)
 
@@ -388,7 +407,7 @@ async def on_guild_join(guild):
         )
 
 # ============================================================
-#  SECTION 5: VIEWS (BUTTONS, DM CONFIRMATION, ADMIN SETUP)
+#  SECTION 5: VIEWS (BUTTONS & DM CONFIRMATION)
 # ============================================================
 
 class SuggestionConfirmView(discord.ui.View):
@@ -402,18 +421,13 @@ class SuggestionConfirmView(discord.ui.View):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
 
-        suggestion_channel_id = get_default_suggestion_channel_id()
-        if suggestion_channel_id is None:
-            return await interaction.response.edit_message(
-                content="Suggestion channel is not configured. Please ask an admin to run `/admin setup`.",
-                view=None
-            )
-
-        channel = interaction.client.get_channel(suggestion_channel_id)
+        # NOW: send to FEEDBACK channel, not suggestion channel
+        feedback_channel_id = get_default_feedback_channel_id()
+        channel = interaction.client.get_channel(feedback_channel_id)
 
         if not channel:
             return await interaction.response.edit_message(
-                content="Suggestion channel is not configured correctly.",
+                content="Feedback channel is not configured correctly.",
                 view=None
             )
 
@@ -459,339 +473,6 @@ class MessageMeButton(discord.ui.View):
                 "I couldn't DM you! Please enable DMs from server members.",
                 ephemeral=True
             )
-
-# -----------------------------
-# ADMIN SETUP WIZARD VIEW
-# -----------------------------
-
-class SetupWizard(discord.ui.View):
-    """
-    /admin setup wizard:
-    Steps:
-      1. Hydra Warning Channel
-      2. Suggestion Channel
-      3. Feedback Channel
-      4. Commands Guide Channel
-      5. Review & Save
-
-    Storage semantics:
-      - None  → Not configured
-      - 0     → Not Required
-      - >0    → Channel ID
-    """
-    def __init__(self, interaction: discord.Interaction):
-        super().__init__(timeout=300)
-        self.interaction = interaction
-        self.guild = interaction.guild
-        self.step = 1
-
-        channels = get_guild_channels(self.guild.id)
-        self.warning_channel_id = channels["warning_channel_id"]
-        self.suggestion_channel_id = channels["suggestion_channel_id"]
-        self.feedback_channel_id = channels["feedback_channel_id"]
-        self.commands_channel_id = channels["commands_channel_id"]
-
-        self.message = None
-        self.add_item(self._build_select())
-
-    # ------------- helpers -------------
-
-    def _current_field_name(self):
-        if self.step == 1:
-            return "warning_channel_id"
-        if self.step == 2:
-            return "suggestion_channel_id"
-        if self.step == 3:
-            return "feedback_channel_id"
-        if self.step == 4:
-            return "commands_channel_id"
-        return None
-
-    def _current_title(self):
-        if self.step == 1:
-            return "Step 1 — Hydra Warning Channel"
-        if self.step == 2:
-            return "Step 2 — Suggestion Channel"
-        if self.step == 3:
-            return "Step 3 — Feedback Channel"
-        if self.step == 4:
-            return "Step 4 — Commands Guide Channel"
-        if self.step == 5:
-            return "Step 5 — Review & Save"
-        return "Setup Wizard"
-
-    def _current_description(self):
-        if self.step == 1:
-            return (
-                "Choose which channel should receive **Hydra/Chimera warnings**.\n\n"
-                "• Select a channel\n"
-                "• Or choose **Not Required** if you don't want warnings\n"
-                "• Or leave unselected to keep it **Not configured**"
-            )
-        if self.step == 2:
-            return (
-                "Choose which channel should receive **suggestions**.\n\n"
-                "This is where the bot will post anonymous suggestions and the suggestion button."
-            )
-        if self.step == 3:
-            return (
-                "Choose which channel should receive **feedback**.\n\n"
-                "You can use this for general feedback or future features."
-            )
-        if self.step == 4:
-            return (
-                "Choose which channel should receive the **commands guide**.\n\n"
-                "If unset, `$commands` and `/admin commands-guide` will post in the current channel."
-            )
-        if self.step == 5:
-            return "Review your configuration below, then click **Save** or go **Back** to adjust."
-        return ""
-
-    def _get_value_for_field(self, field: str):
-        return getattr(self, field)
-
-    def _set_value_for_field(self, field: str, value):
-        setattr(self, field, value)
-
-    def _format_channel_value(self, value: int | None):
-        if value is None:
-            return "Not configured"
-        if value == 0:
-            return "Not Required"
-        channel = self.guild.get_channel(value)
-        if channel:
-            return channel.mention
-        return f"<#{value}> (missing)"
-
-    def _build_select(self) -> discord.ui.Select:
-        options = []
-
-        # Not Required option
-        options.append(
-            discord.SelectOption(
-                label="❌ Not Required",
-                value="0",
-                description="Disable this feature for this server."
-            )
-        )
-
-        # All text channels
-        for ch in self.guild.text_channels:
-            options.append(
-                discord.SelectOption(
-                    label=f"#{ch.name}",
-                    value=str(ch.id)
-                )
-            )
-
-        select = discord.ui.Select(
-            placeholder="Select a channel or Not Required…",
-            min_values=1,
-            max_values=1,
-            options=options
-        )
-
-        async def callback(interaction: discord.Interaction):
-            if interaction.user.id != self.interaction.user.id:
-                return await interaction.response.send_message(
-                    "You are not the owner of this setup session.",
-                    ephemeral=True
-                )
-
-            field = self._current_field_name()
-            if not field:
-                return await interaction.response.defer()
-
-            raw = select.values[0]
-            if raw == "0":
-                value = 0
-            else:
-                value = int(raw)
-
-            self._set_value_for_field(field, value)
-
-            await interaction.response.defer()
-
-        select.callback = callback
-        return select
-
-    def _build_embed(self) -> discord.Embed:
-        if self.step < 5:
-            embed = discord.Embed(
-                title=self._current_title(),
-                description=self._current_description(),
-                color=discord.Color.blurple()
-            )
-        else:
-            embed = discord.Embed(
-                title="Step 5 — Review & Save",
-                description=self._current_description(),
-                color=discord.Color.green()
-            )
-
-            embed.add_field(
-                name="Hydra Warning Channel",
-                value=self._format_channel_value(self.warning_channel_id),
-                inline=False
-            )
-            embed.add_field(
-                name="Suggestion Channel",
-                value=self._format_channel_value(self.suggestion_channel_id),
-                inline=False
-            )
-            embed.add_field(
-                name="Feedback Channel",
-                value=self._format_channel_value(self.feedback_channel_id),
-                inline=False
-            )
-            embed.add_field(
-                name="Commands Guide Channel",
-                value=self._format_channel_value(self.commands_channel_id),
-                inline=False
-            )
-
-        return embed
-
-    async def start(self):
-        embed = self._build_embed()
-        self.message = await self.interaction.response.send_message(
-            embed=embed,
-            view=self
-        )
-
-    async def _refresh(self, interaction: discord.Interaction | None = None):
-        # Rebuild select for steps 1–4
-        self.clear_items()
-        if self.step <= 4:
-            self.add_item(self._build_select())
-
-        # Buttons
-        self.add_item(self.back_button)
-        self.add_item(self.skip_button)
-        self.add_item(self.next_button)
-        self.add_item(self.cancel_button)
-
-        embed = self._build_embed()
-
-        if interaction:
-            await interaction.edit_original_response(embed=embed, view=self)
-        else:
-            await self.interaction.edit_original_response(embed=embed, view=self)
-
-    # ------------- buttons -------------
-
-    @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary, row=1)
-    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction.user.id:
-            return await interaction.response.send_message(
-                "You are not the owner of this setup session.",
-                ephemeral=True
-            )
-
-        if self.step > 1:
-            self.step -= 1
-        await interaction.response.defer()
-        await self._refresh(interaction)
-
-    @discord.ui.button(label="Skip (Not Required)", style=discord.ButtonStyle.secondary, row=1)
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction.user.id:
-            return await interaction.response.send_message(
-                "You are not the owner of this setup session.",
-                ephemeral=True
-            )
-
-        field = self._current_field_name()
-        if field and self.step <= 4:
-            self._set_value_for_field(field, 0)
-
-        if self.step < 5:
-            self.step += 1
-
-        await interaction.response.defer()
-        await self._refresh(interaction)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary, row=1)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction.user.id:
-            return await interaction.response.send_message(
-                "You are not the owner of this setup session.",
-                ephemeral=True
-            )
-
-        if self.step < 5:
-            self.step += 1
-            await interaction.response.defer()
-            await self._refresh(interaction)
-            return
-
-        # Step 5 → Save
-        ensure_guild_row(self.guild.id)
-        set_guild_channel(self.guild.id, "warning_channel_id", self.warning_channel_id)
-        set_guild_channel(self.guild.id, "suggestion_channel_id", self.suggestion_channel_id)
-        set_guild_channel(self.guild.id, "feedback_channel_id", self.feedback_channel_id)
-        set_guild_channel(self.guild.id, "commands_channel_id", self.commands_channel_id)
-
-        # Auto-post suggestion button if configured and not disabled
-        if self.suggestion_channel_id and self.suggestion_channel_id != 0:
-            channel = self.guild.get_channel(self.suggestion_channel_id)
-            if channel:
-                embed = discord.Embed(
-                    title="💡 Anonymous Suggestions",
-                    description=(
-                        "Want to submit feedback privately?\n"
-                        "Click the button below and I'll open a DM where you can send your anonymous suggestion."
-                    ),
-                    color=discord.Color.green()
-                )
-                await channel.send(embed=embed, view=MessageMeButton())
-
-        summary_embed = discord.Embed(
-            title="✅ Setup Complete",
-            description="Your configuration has been saved.",
-            color=discord.Color.green()
-        )
-        summary_embed.add_field(
-            name="Hydra Warning Channel",
-            value=self._format_channel_value(self.warning_channel_id),
-            inline=False
-        )
-        summary_embed.add_field(
-            name="Suggestion Channel",
-            value=self._format_channel_value(self.suggestion_channel_id),
-            inline=False
-        )
-        summary_embed.add_field(
-            name="Feedback Channel",
-            value=self._format_channel_value(self.feedback_channel_id),
-            inline=False
-        )
-        summary_embed.add_field(
-            name="Commands Guide Channel",
-            value=self._format_channel_value(self.commands_channel_id),
-            inline=False
-        )
-
-        self.clear_items()
-        await interaction.response.edit_message(embed=summary_embed, view=None)
-        self.stop()
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger, row=1)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.interaction.user.id:
-            return await interaction.response.send_message(
-                "You are not the owner of this setup session.",
-                ephemeral=True
-            )
-
-        embed = discord.Embed(
-            title="Setup Cancelled",
-            description="No changes were saved.",
-            color=discord.Color.red()
-        )
-        self.clear_items()
-        await interaction.response.edit_message(embed=embed, view=None)
-        self.stop()
 
 # ============================================================
 #  SECTION 6: on_message (ANONYMOUS SUGGESTIONS)
@@ -1420,38 +1101,14 @@ async def announce_error(ctx, error):
         await ctx.send(choice)
 
 # -----------------------------
-# SUGGEST BUTTON COMMAND (PREFIX ADMIN, DB-DRIVEN)
+# SUGGEST BUTTON COMMAND (PREFIX ADMIN)
 # -----------------------------
 
 @bot.command(name="suggestbutton")
 @commands.has_permissions(administrator=True)
 async def suggest_button_cmd(ctx):
-    if not ctx.guild:
-        return await ctx.send("This command can only be used in a server.")
-
-    channels = get_guild_channels(ctx.guild.id)
-    suggestion_channel_id = channels["suggestion_channel_id"]
-
-    if suggestion_channel_id is None:
-        return await ctx.send(
-            "Suggestion channel is not configured. Ask an admin to run `/admin setup`."
-        )
-
-    if suggestion_channel_id == 0:
-        return await ctx.send(
-            "Suggestion feature is currently **Not Required** for this server."
-        )
-
-    if suggestion_channel_id != ctx.channel.id:
-        channel = ctx.guild.get_channel(suggestion_channel_id)
-        if channel:
-            return await ctx.send(
-                f"This command can only be used in {channel.mention}."
-            )
-        else:
-            return await ctx.send(
-                "Configured suggestion channel no longer exists. Ask an admin to run `/admin setup` again."
-            )
+    if ctx.channel.id not in ALLOWED_SUGGEST_BUTTON_CHANNELS:
+        return await ctx.send("This command can only be used in approved channels.")
 
     embed = discord.Embed(
         title="💡 Anonymous Suggestions",
@@ -1463,6 +1120,58 @@ async def suggest_button_cmd(ctx):
     )
 
     await ctx.send(embed=embed, view=MessageMeButton())
+
+# -----------------------------
+# NEW PREFIX ADMIN CHANNEL SETTERS
+# -----------------------------
+
+@bot.command(name="setchannelwarning")
+@commands.has_permissions(administrator=True)
+async def set_channel_warning_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "warning_channel_id", channel.id)
+    await ctx.send(f"Hydra warning channel set to {channel.mention}.")
+
+
+@bot.command(name="setchannelsuggestion")
+@commands.has_permissions(administrator=True)
+async def set_channel_suggestion_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "suggestion_channel_id", channel.id)
+    # Only button lives here
+    embed = discord.Embed(
+        title="💡 Anonymous Suggestions",
+        description=(
+            "Want to submit feedback privately?\n"
+            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
+        ),
+        color=discord.Color.green()
+    )
+    await channel.send(embed=embed, view=MessageMeButton())
+    await ctx.send(f"Suggestion channel set to {channel.mention} and button posted.")
+
+
+@bot.command(name="setchannelfeedback")
+@commands.has_permissions(administrator=True)
+async def set_channel_feedback_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "feedback_channel_id", channel.id)
+    await ctx.send(f"Feedback channel set to {channel.mention}.")
+
+
+@bot.command(name="setchannelcommands")
+@commands.has_permissions(administrator=True)
+async def set_channel_commands_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "commands_channel_id", channel.id)
+    embed = build_commands_guide_embed()
+    await channel.send(embed=embed)
+    await ctx.send(f"Commands guide channel set to {channel.mention} and guide posted.")
+
+
+@bot.command(name="setchannelmercy")
+@commands.has_permissions(administrator=True)
+async def set_channel_mercy_prefix(ctx, channel: discord.TextChannel):
+    set_guild_channel(ctx.guild.id, "mercy_channel_id", channel.id)
+    embed = build_mercy_guide_embed()
+    await channel.send(embed=embed)
+    await ctx.send(f"Mercy guide channel set to {channel.mention} and guide posted.")
 
 # -----------------------------
 # COMMAND GUIDE (PREFIX)
@@ -1562,7 +1271,7 @@ async def commands_prefix(ctx):
     if ctx.guild:
         channels = get_guild_channels(ctx.guild.id)
         commands_channel_id = channels["commands_channel_id"]
-        if commands_channel_id and commands_channel_id != 0:
+        if commands_channel_id:
             channel = ctx.guild.get_channel(commands_channel_id)
         else:
             channel = ctx.channel
@@ -2366,7 +2075,6 @@ async def admin_purge_slash(
         ephemeral=True
     )
 
-# NEW: ADMIN SUGGEST BUTTON (SLASH, DB-DRIVEN)
 
 @admin_group.command(name="suggest-button", description="Post the anonymous suggestion button.")
 @app_commands.default_permissions(administrator=True)
@@ -2379,39 +2087,11 @@ async def admin_suggest_button_slash(
             ephemeral=True
         )
 
-    if not interaction.guild:
+    if interaction.channel.id not in ALLOWED_SUGGEST_BUTTON_CHANNELS:
         return await interaction.response.send_message(
-            "This command can only be used in a server.",
+            "This command can only be used in approved channels.",
             ephemeral=True
         )
-
-    channels = get_guild_channels(interaction.guild.id)
-    suggestion_channel_id = channels["suggestion_channel_id"]
-
-    if suggestion_channel_id is None:
-        return await interaction.response.send_message(
-            "Suggestion channel is not configured. Ask an admin to run `/admin setup`.",
-            ephemeral=True
-        )
-
-    if suggestion_channel_id == 0:
-        return await interaction.response.send_message(
-            "Suggestion feature is currently **Not Required** for this server.",
-            ephemeral=True
-        )
-
-    if suggestion_channel_id != interaction.channel.id:
-        channel = interaction.guild.get_channel(suggestion_channel_id)
-        if channel:
-            return await interaction.response.send_message(
-                f"This command can only be used in {channel.mention}.",
-                ephemeral=True
-            )
-        else:
-            return await interaction.response.send_message(
-                "Configured suggestion channel no longer exists. Run `/admin setup` again.",
-                ephemeral=True
-            )
 
     embed = discord.Embed(
         title="💡 Anonymous Suggestions",
@@ -2424,12 +2104,16 @@ async def admin_suggest_button_slash(
 
     await interaction.response.send_message(embed=embed, view=MessageMeButton())
 
-# NEW: ADMIN SETUP WIZARD (SLASH)
+# -----------------------------
+# ADMIN GROUP: CHANNEL SETTERS (SLASH)
+# -----------------------------
 
-@admin_group.command(name="setup", description="Run the HydraBot setup wizard.")
+@admin_group.command(name="set-channel-warning", description="Set the Hydra warning channel.")
 @app_commands.default_permissions(administrator=True)
-async def admin_setup_slash(
-    interaction: discord.Interaction
+@app_commands.describe(channel="Channel where Hydra warnings will be posted")
+async def admin_set_channel_warning_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
 ):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message(
@@ -2437,14 +2121,110 @@ async def admin_setup_slash(
             ephemeral=True
         )
 
-    if not interaction.guild:
+    set_guild_channel(interaction.guild.id, "warning_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Hydra warning channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+
+@admin_group.command(name="set-channel-suggestion", description="Set the suggestion channel.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel where the suggestion button will be posted")
+async def admin_set_channel_suggestion_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message(
-            "This command can only be used in a server.",
+            "You do not have permission to use this command.",
             ephemeral=True
         )
 
-    view = SetupWizard(interaction)
-    await view.start()
+    set_guild_channel(interaction.guild.id, "suggestion_channel_id", channel.id)
+
+    embed = discord.Embed(
+        title="💡 Anonymous Suggestions",
+        description=(
+            "Want to submit feedback privately?\n"
+            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
+        ),
+        color=discord.Color.green()
+    )
+
+    await channel.send(embed=embed, view=MessageMeButton())
+    await interaction.response.send_message(
+        f"Suggestion channel set to {channel.mention} and button posted.",
+        ephemeral=True
+    )
+
+
+@admin_group.command(name="set-channel-feedback", description="Set the feedback channel.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel where anonymous feedback will be posted")
+async def admin_set_channel_feedback_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "feedback_channel_id", channel.id)
+    await interaction.response.send_message(
+        f"Feedback channel set to {channel.mention}.",
+        ephemeral=True
+    )
+
+
+@admin_group.command(name="set-channel-commands", description="Set the commands guide channel.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel where the commands guide will be posted")
+async def admin_set_channel_commands_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "commands_channel_id", channel.id)
+
+    embed = build_commands_guide_embed()
+    await channel.send(embed=embed)
+
+    await interaction.response.send_message(
+        f"Commands guide channel set to {channel.mention} and guide posted.",
+        ephemeral=True
+    )
+
+
+@admin_group.command(name="set-channel-mercy", description="Set the mercy guide channel.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(channel="Channel where the mercy guide will be posted")
+async def admin_set_channel_mercy_slash(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel
+):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission to use this command.",
+            ephemeral=True
+        )
+
+    set_guild_channel(interaction.guild.id, "mercy_channel_id", channel.id)
+
+    embed = build_mercy_guide_embed()
+    await channel.send(embed=embed)
+
+    await interaction.response.send_message(
+        f"Mercy guide channel set to {channel.mention} and guide posted.",
+        ephemeral=True
+    )
 
 # -----------------------------
 # ADMIN GROUP: COMMANDS GUIDE & MERCY GUIDE (SLASH)
@@ -2463,7 +2243,7 @@ async def admin_commands_guide_slash(
 
     channels = get_guild_channels(interaction.guild.id)
     commands_channel_id = channels["commands_channel_id"]
-    if commands_channel_id and commands_channel_id != 0:
+    if commands_channel_id:
         channel = interaction.guild.get_channel(commands_channel_id)
     else:
         channel = interaction.channel
