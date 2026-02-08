@@ -199,6 +199,51 @@ def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chan
     return discord.Color.red(), False, "🔴 Low mercy"
 
 # ============================================================
+#  SECTION 3.5: SCHEDULER WARNING TASKS
+# ============================================================
+
+async def send_weekly_warning():
+    for guild in bot.guilds:
+        channels = get_guild_channels(guild.id)
+        channel_id = channels["warning_channel_id"]
+
+        if channel_id is None:
+            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
+            if channel and channel.guild.id == guild.id:
+                target_channel = channel
+            else:
+                continue
+        else:
+            target_channel = guild.get_channel(channel_id)
+
+        if target_channel:
+            await target_channel.send(
+                "@everyone 24 HOUR WARNING FOR HYDRA CLASH, "
+                "Don't forget or you'll miss out on rewards!"
+            )
+
+
+async def send_chimera_warning():
+    for guild in bot.guilds:
+        channels = get_guild_channels(guild.id)
+        channel_id = channels["warning_channel_id"]
+
+        if channel_id is None:
+            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
+            if channel and channel.guild.id == guild.id:
+                target_channel = channel
+            else:
+                continue
+        else:
+            target_channel = guild.get_channel(channel_id)
+
+        if target_channel:
+            await target_channel.send(
+                "@everyone 24 HOUR WARNING FOR CHIMERA CLASH, "
+                "Don't forget or you'll miss out on rewards!"
+            )
+
+# ============================================================
 #  SECTION 4: EVENTS
 # ============================================================
 
