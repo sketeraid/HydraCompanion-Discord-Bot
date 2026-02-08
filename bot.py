@@ -106,12 +106,10 @@ CREATE TABLE IF NOT EXISTS guild_channels (
 )
 """)
 
-# In case the table existed before mercy_channel_id was added
 try:
     c.execute("ALTER TABLE guild_channels ADD COLUMN mercy_channel_id INTEGER")
     conn.commit()
 except sqlite3.OperationalError:
-    # Column already exists or table just created with it
     pass
 
 conn.commit()
@@ -127,7 +125,6 @@ def calc_epic_chance(shard_type, pity):
             return base
         extra = pity - 20
         return min(100.0, base + extra * 2.0)
-
     return BASE_RATES[shard_type]["epic"]
 
 
@@ -163,7 +160,6 @@ def calc_mythical_chance(shard_type, pity):
             return base
         extra = pity - 200
         return min(100.0, base + extra * 10.0)
-
     return BASE_RATES[shard_type]["mythical"]
 
 # -----------------------------
@@ -211,7 +207,7 @@ def ensure_guild_row(guild_id: int):
         conn.commit()
 
 
-def set_guild_channel(guild_id: int, field: str, channel_id: int):
+def set_guild_channel(guild_id: int, field: str, channel_id: int | None):
     ensure_guild_row(guild_id)
     if field not in (
         "warning_channel_id",
@@ -223,7 +219,7 @@ def set_guild_channel(guild_id: int, field: str, channel_id: int):
         return
     c.execute(
         f"UPDATE guild_channels SET {field}=? WHERE guild_id=?",
-        (int(channel_id), str(guild_id))
+        (int(channel_id) if channel_id is not None else None, str(guild_id))
     )
     conn.commit()
 
@@ -257,11 +253,6 @@ def get_guild_channels(guild_id: int):
 
 
 def get_default_feedback_channel_id():
-    """
-    For the DM-based anonymous suggestion flow.
-    Picks the first configured feedback channel.
-    Falls back to SUGGESTION_CHANNEL_ID constant if none set.
-    """
     c.execute("""
         SELECT feedback_channel_id
         FROM guild_channels
@@ -275,13 +266,6 @@ def get_default_feedback_channel_id():
 
 
 def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
-    """
-    Returns (color, ready_flag_bool, status_text_for_table)
-    Ready only if:
-      - Legendary > 74% (all shards)
-      - OR Mythical > 74% (primal only)
-    Epic is ignored for readiness.
-    """
     if shard_type == "primal":
         relevant = max(legendary_chance, mythical_chance or 0.0)
     else:
@@ -378,14 +362,9 @@ async def on_ready():
     scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
     scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
 
-    # ============================================================
-    # AUTO CLEANUP OF STALE SLASH COMMANDS (D-2, Z-1)
-    # ============================================================
+    # AUTO CLEANUP OF STALE SLASH COMMANDS (D-2)
     try:
-        # Commands defined in this codebase
         desired_names = {cmd.name for cmd in bot.tree.walk_commands()}
-
-        # Commands currently registered on Discord
         remote_cmds = await bot.tree.fetch_commands()
 
         for rc in remote_cmds:
@@ -398,9 +377,6 @@ async def on_ready():
     except Exception as e:
         print(f"[CLEANUP] Error during slash command cleanup: {e}")
 
-    # ============================================================
-    # SYNC CLEAN TREE
-    # ============================================================
     try:
         await bot.tree.sync()
         print("Slash commands synced (after cleanup).")
@@ -410,7 +386,6 @@ async def on_ready():
 
 @bot.event
 async def on_guild_join(guild):
-    # Welcome message when the bot joins a new server
     channel = None
     for ch in guild.text_channels:
         if ch.permissions_for(guild.me).send_messages:
@@ -430,7 +405,7 @@ async def on_guild_join(guild):
         )
 
 # ============================================================
-#  SECTION 5: VIEWS (BUTTONS & DM CONFIRMATION)
+#  SECTION 5: VIEWS (BUTTONS, DM CONFIRMATION, SETUP WIZARD)
 # ============================================================
 
 class SuggestionConfirmView(discord.ui.View):
@@ -444,7 +419,6 @@ class SuggestionConfirmView(discord.ui.View):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
 
-        # NOW: send to FEEDBACK channel, not suggestion channel
         feedback_channel_id = get_default_feedback_channel_id()
         channel = interaction.client.get_channel(feedback_channel_id)
 
@@ -497,6 +471,225 @@ class MessageMeButton(discord.ui.View):
                 ephemeral=True
             )
 
+# -----------------------------
+# SETUP WIZARD VIEWS
+# -----------------------------
+
+class SetupBaseView(discord.ui.View):
+    def __init__(self, owner_id: int, guild: discord.Guild, state: dict):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.guild = guild
+        self.state = state
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message(
+                "This setup wizard is not for you.",
+                ephemeral=True
+            )
+            return False
+        return True
+
+
+class CommandsChannelView(SetupBaseView):
+    @discord.ui.channel_select(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select the Commands Guide channel..."
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        set_guild_channel(self.guild.id, "commands_channel_id", channel.id)
+        self.state["commands_channel"] = channel
+
+        embed = build_commands_guide_embed()
+        await channel.send(embed=embed)
+
+        await interaction.response.edit_message(
+            content=f"✅ Commands Guide channel set to {channel.mention}.",
+            view=None
+        )
+
+        await start_mercy_step(interaction, self.state)
+
+
+class MercyChannelView(SetupBaseView):
+    @discord.ui.channel_select(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select the Mercy Guide channel..."
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        set_guild_channel(self.guild.id, "mercy_channel_id", channel.id)
+        self.state["mercy_channel"] = channel
+
+        embed = build_mercy_guide_embed()
+        await channel.send(embed=embed)
+
+        await interaction.response.edit_message(
+            content=f"✅ Mercy Guide channel set to {channel.mention}.",
+            view=None
+        )
+
+        await start_suggestion_step(interaction, self.state)
+
+
+class SuggestionChannelView(SetupBaseView):
+    @discord.ui.channel_select(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select the Suggestion channel (optional)..."
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        set_guild_channel(self.guild.id, "suggestion_channel_id", channel.id)
+        self.state["suggestion_channel"] = channel
+
+        embed = discord.Embed(
+            title="💡 Anonymous Suggestions",
+            description=(
+                "Want to submit feedback privately?\n"
+                "Click the button below and I'll open a DM where you can send your anonymous suggestion."
+            ),
+            color=discord.Color.green()
+        )
+        await channel.send(embed=embed, view=MessageMeButton())
+
+        await interaction.response.edit_message(
+            content=f"✅ Suggestion channel set to {channel.mention}.",
+            view=None
+        )
+
+        await start_feedback_step(interaction, self.state)
+
+    @discord.ui.button(label="Skip this step", style=discord.ButtonStyle.secondary)
+    async def skip_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        set_guild_channel(self.guild.id, "suggestion_channel_id", None)
+        self.state["suggestion_channel"] = None
+
+        await interaction.response.edit_message(
+            content="⏭ Suggestion channel skipped.",
+            view=None
+        )
+
+        await start_feedback_step(interaction, self.state)
+
+
+class FeedbackChannelView(SetupBaseView):
+    @discord.ui.channel_select(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select the Feedback channel (optional)..."
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        set_guild_channel(self.guild.id, "feedback_channel_id", channel.id)
+        self.state["feedback_channel"] = channel
+
+        await interaction.response.edit_message(
+            content=f"✅ Feedback channel set to {channel.mention}.",
+            view=None
+        )
+
+        await start_warning_step(interaction, self.state)
+
+    @discord.ui.button(label="Skip this step", style=discord.ButtonStyle.secondary)
+    async def skip_step(self, interaction: discord.Interaction, button: discord.ui.Button):
+        set_guild_channel(self.guild.id, "feedback_channel_id", None)
+        self.state["feedback_channel"] = None
+
+        await interaction.response.edit_message(
+            content="⏭ Feedback channel skipped.",
+            view=None
+        )
+
+        await start_warning_step(interaction, self.state)
+
+
+class WarningChannelView(SetupBaseView):
+    @discord.ui.channel_select(
+        channel_types=[discord.ChannelType.text],
+        placeholder="Select the Hydra warning channel..."
+    )
+    async def select_channel(self, interaction: discord.Interaction, select: discord.ui.ChannelSelect):
+        channel = select.values[0]
+        set_guild_channel(self.guild.id, "warning_channel_id", channel.id)
+        self.state["warning_channel"] = channel
+
+        await interaction.response.edit_message(
+            content=f"✅ Warning channel set to {channel.mention}.",
+            view=None
+        )
+
+        await finish_setup_summary(interaction, self.state)
+
+# -----------------------------
+# SETUP WIZARD HELPERS
+# -----------------------------
+
+async def start_commands_step(interaction: discord.Interaction, state: dict):
+    view = CommandsChannelView(interaction.user.id, interaction.guild, state)
+    await interaction.response.send_message(
+        "Step 1/5 — Select the **Commands Guide** channel (required):",
+        view=view
+    )
+
+
+async def start_mercy_step(interaction: discord.Interaction, state: dict):
+    view = MercyChannelView(interaction.user.id, interaction.guild, state)
+    await interaction.followup.send(
+        "Step 2/5 — Select the **Mercy Guide** channel (required):",
+        view=view
+    )
+
+
+async def start_suggestion_step(interaction: discord.Interaction, state: dict):
+    view = SuggestionChannelView(interaction.user.id, interaction.guild, state)
+    await interaction.followup.send(
+        "Step 3/5 — Select the **Suggestion** channel (optional):",
+        view=view
+    )
+
+
+async def start_feedback_step(interaction: discord.Interaction, state: dict):
+    view = FeedbackChannelView(interaction.user.id, interaction.guild, state)
+    await interaction.followup.send(
+        "Step 4/5 — Select the **Feedback** channel (optional):",
+        view=view
+    )
+
+
+async def start_warning_step(interaction: discord.Interaction, state: dict):
+    view = WarningChannelView(interaction.user.id, interaction.guild, state)
+    await interaction.followup.send(
+        "Step 5/5 — Select the **Hydra Warning** channel (required):",
+        view=view
+    )
+
+
+async def finish_setup_summary(interaction: discord.Interaction, state: dict):
+    guild = interaction.guild
+    channels = get_guild_channels(guild.id)
+
+    def fmt(ch):
+        return ch.mention if isinstance(ch, discord.TextChannel) else "Skipped"
+
+    commands_ch = guild.get_channel(channels["commands_channel_id"]) if channels["commands_channel_id"] else None
+    mercy_ch = guild.get_channel(channels["mercy_channel_id"]) if channels["mercy_channel_id"] else None
+    suggestion_ch = guild.get_channel(channels["suggestion_channel_id"]) if channels["suggestion_channel_id"] else None
+    feedback_ch = guild.get_channel(channels["feedback_channel_id"]) if channels["feedback_channel_id"] else None
+    warning_ch = guild.get_channel(channels["warning_channel_id"]) if channels["warning_channel_id"] else None
+
+    embed = discord.Embed(
+        title="✅ HydraBot Setup Complete",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Commands Guide Channel", value=fmt(commands_ch), inline=False)
+    embed.add_field(name="Mercy Guide Channel", value=fmt(mercy_ch), inline=False)
+    embed.add_field(name="Suggestion Channel", value=fmt(suggestion_ch), inline=False)
+    embed.add_field(name="Feedback Channel", value=fmt(feedback_ch), inline=False)
+    embed.add_field(name="Warning Channel", value=fmt(warning_ch), inline=False)
+
+    await interaction.followup.send(embed=embed)
+
 # ============================================================
 #  SECTION 6: on_message (ANONYMOUS SUGGESTIONS)
 # ============================================================
@@ -531,10 +724,6 @@ async def on_message(message):
 #  SECTION 7: PREFIX COMMANDS
 # ============================================================
 
-# -----------------------------
-# BASIC PREFIX COMMANDS
-# -----------------------------
-
 @bot.command()
 async def test(ctx):
     await ctx.message.delete()
@@ -553,9 +742,6 @@ async def chests(ctx):
     await ctx.send(message)
     await ctx.message.delete()
 
-# -----------------------------
-# SUPPORT & DEVELOPER (PREFIX)
-# -----------------------------
 
 @bot.command(name="support")
 async def support_prefix(ctx):
@@ -880,7 +1066,7 @@ async def mercy_table_cmd(ctx):
             mythical_chance = calc_mythical_chance(shard, mythical)
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
             lines.append(f"**Mythical:** {mythical} pulls — {mythical_chance:.2f}%")
-        else:  # sacred
+        else:
             lines.append(f"**Legendary:** {legendary} pulls — {legendary_chance:.2f}%")
 
         _, _, status = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
@@ -911,7 +1097,6 @@ async def mercy_compare_cmd(ctx, member: discord.Member):
 
         lines = []
 
-        # User 1
         if shard in ("ancient", "void"):
             e1 = calc_epic_chance(shard, epic1)
             l1 = calc_legendary_chance(shard, legendary1)
@@ -933,7 +1118,6 @@ async def mercy_compare_cmd(ctx, member: discord.Member):
                 f"L:{legendary1} ({l1:.2f}%)"
             )
 
-        # User 2
         if shard in ("ancient", "void"):
             e2 = calc_epic_chance(shard, epic2)
             l2 = calc_legendary_chance(shard, legendary2)
@@ -1143,58 +1327,6 @@ async def suggest_button_cmd(ctx):
     )
 
     await ctx.send(embed=embed, view=MessageMeButton())
-
-# -----------------------------
-# NEW PREFIX ADMIN CHANNEL SETTERS
-# -----------------------------
-
-@bot.command(name="setchannelwarning")
-@commands.has_permissions(administrator=True)
-async def set_channel_warning_prefix(ctx, channel: discord.TextChannel):
-    set_guild_channel(ctx.guild.id, "warning_channel_id", channel.id)
-    await ctx.send(f"Hydra warning channel set to {channel.mention}.")
-
-
-@bot.command(name="setchannelsuggestion")
-@commands.has_permissions(administrator=True)
-async def set_channel_suggestion_prefix(ctx, channel: discord.TextChannel):
-    set_guild_channel(ctx.guild.id, "suggestion_channel_id", channel.id)
-    # Only button lives here
-    embed = discord.Embed(
-        title="💡 Anonymous Suggestions",
-        description=(
-            "Want to submit feedback privately?\n"
-            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
-        ),
-        color=discord.Color.green()
-    )
-    await channel.send(embed=embed, view=MessageMeButton())
-    await ctx.send(f"Suggestion channel set to {channel.mention} and button posted.")
-
-
-@bot.command(name="setchannelfeedback")
-@commands.has_permissions(administrator=True)
-async def set_channel_feedback_prefix(ctx, channel: discord.TextChannel):
-    set_guild_channel(ctx.guild.id, "feedback_channel_id", channel.id)
-    await ctx.send(f"Feedback channel set to {channel.mention}.")
-
-
-@bot.command(name="setchannelcommands")
-@commands.has_permissions(administrator=True)
-async def set_channel_commands_prefix(ctx, channel: discord.TextChannel):
-    set_guild_channel(ctx.guild.id, "commands_channel_id", channel.id)
-    embed = build_commands_guide_embed()
-    await channel.send(embed=embed)
-    await ctx.send(f"Commands guide channel set to {channel.mention} and guide posted.")
-
-
-@bot.command(name="setchannelmercy")
-@commands.has_permissions(administrator=True)
-async def set_channel_mercy_prefix(ctx, channel: discord.TextChannel):
-    set_guild_channel(ctx.guild.id, "mercy_channel_id", channel.id)
-    embed = build_mercy_guide_embed()
-    await channel.send(embed=embed)
-    await ctx.send(f"Mercy guide channel set to {channel.mention} and guide posted.")
 
 # -----------------------------
 # COMMAND GUIDE (PREFIX)
@@ -1617,7 +1749,6 @@ async def mercy_compare_slash(
 
         lines = []
 
-        # User 1
         if shard in ("ancient", "void"):
             e1 = calc_epic_chance(shard, epic1)
             l1 = calc_legendary_chance(shard, legendary1)
@@ -1639,7 +1770,6 @@ async def mercy_compare_slash(
                 f"L:{legendary1} ({l1:.2f}%)"
             )
 
-        # User 2
         if shard in ("ancient", "void"):
             e2 = calc_epic_chance(shard, epic2)
             l2 = calc_legendary_chance(shard, legendary2)
@@ -2128,126 +2258,20 @@ async def admin_suggest_button_slash(
     await interaction.response.send_message(embed=embed, view=MessageMeButton())
 
 # -----------------------------
-# ADMIN GROUP: CHANNEL SETTERS (SLASH)
+# ADMIN GROUP: SETUP WIZARD (SLASH)
 # -----------------------------
 
-@admin_group.command(name="set-channel-warning", description="Set the Hydra warning channel.")
+@admin_group.command(name="setup", description="Run the HydraBot setup wizard.")
 @app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel where Hydra warnings will be posted")
-async def admin_set_channel_warning_slash(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
+async def admin_setup_slash(interaction: discord.Interaction):
     if not interaction.user.guild_permissions.administrator:
         return await interaction.response.send_message(
             "You do not have permission to use this command.",
             ephemeral=True
         )
 
-    set_guild_channel(interaction.guild.id, "warning_channel_id", channel.id)
-    await interaction.response.send_message(
-        f"Hydra warning channel set to {channel.mention}.",
-        ephemeral=True
-    )
-
-
-@admin_group.command(name="set-channel-suggestion", description="Set the suggestion channel.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel where the suggestion button will be posted")
-async def admin_set_channel_suggestion_slash(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(
-            "You do not have permission to use this command.",
-            ephemeral=True
-        )
-
-    set_guild_channel(interaction.guild.id, "suggestion_channel_id", channel.id)
-
-    embed = discord.Embed(
-        title="💡 Anonymous Suggestions",
-        description=(
-            "Want to submit feedback privately?\n"
-            "Click the button below and I'll open a DM where you can send your anonymous suggestion."
-        ),
-        color=discord.Color.green()
-    )
-
-    await channel.send(embed=embed, view=MessageMeButton())
-    await interaction.response.send_message(
-        f"Suggestion channel set to {channel.mention} and button posted.",
-        ephemeral=True
-    )
-
-
-@admin_group.command(name="set-channel-feedback", description="Set the feedback channel.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel where anonymous feedback will be posted")
-async def admin_set_channel_feedback_slash(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(
-            "You do not have permission to use this command.",
-            ephemeral=True
-        )
-
-    set_guild_channel(interaction.guild.id, "feedback_channel_id", channel.id)
-    await interaction.response.send_message(
-        f"Feedback channel set to {channel.mention}.",
-        ephemeral=True
-    )
-
-
-@admin_group.command(name="set-channel-commands", description="Set the commands guide channel.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel where the commands guide will be posted")
-async def admin_set_channel_commands_slash(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(
-            "You do not have permission to use this command.",
-            ephemeral=True
-        )
-
-    set_guild_channel(interaction.guild.id, "commands_channel_id", channel.id)
-
-    embed = build_commands_guide_embed()
-    await channel.send(embed=embed)
-
-    await interaction.response.send_message(
-        f"Commands guide channel set to {channel.mention} and guide posted.",
-        ephemeral=True
-    )
-
-
-@admin_group.command(name="set-channel-mercy", description="Set the mercy guide channel.")
-@app_commands.default_permissions(administrator=True)
-@app_commands.describe(channel="Channel where the mercy guide will be posted")
-async def admin_set_channel_mercy_slash(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel
-):
-    if not interaction.user.guild_permissions.administrator:
-        return await interaction.response.send_message(
-            "You do not have permission to use this command.",
-            ephemeral=True
-        )
-
-    set_guild_channel(interaction.guild.id, "mercy_channel_id", channel.id)
-
-    embed = build_mercy_guide_embed()
-    await channel.send(embed=embed)
-
-    await interaction.response.send_message(
-        f"Mercy guide channel set to {channel.mention} and guide posted.",
-        ephemeral=True
-    )
+    state = {}
+    await start_commands_step(interaction, state)
 
 # -----------------------------
 # ADMIN GROUP: COMMANDS GUIDE & MERCY GUIDE (SLASH)
