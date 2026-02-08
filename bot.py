@@ -2063,7 +2063,7 @@ async def gacha_pull_advice_slash(interaction, event: str | None = None):
         "Not this one. Your future self will thank you."
     ]
 
-        decision = random.choice(["yes", "no"])
+    decision = random.choice(["yes", "no"])
     answer = random.choice(yes if decision == "yes" else no)
     colour = discord.Color.green() if decision == "yes" else discord.Color.red()
 
