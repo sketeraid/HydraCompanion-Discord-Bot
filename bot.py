@@ -493,7 +493,8 @@ class SetupBaseView(discord.ui.View):
 
 
 class CommandsChannelView(SetupBaseView):
-    @discord.ui.channel_select(
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="Select the Commands Guide channel..."
     )
@@ -514,7 +515,8 @@ class CommandsChannelView(SetupBaseView):
 
 
 class MercyChannelView(SetupBaseView):
-    @discord.ui.channel_select(
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="Select the Mercy Guide channel..."
     )
@@ -535,7 +537,8 @@ class MercyChannelView(SetupBaseView):
 
 
 class SuggestionChannelView(SetupBaseView):
-    @discord.ui.channel_select(
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="Select the Suggestion channel (optional)..."
     )
@@ -575,7 +578,8 @@ class SuggestionChannelView(SetupBaseView):
 
 
 class FeedbackChannelView(SetupBaseView):
-    @discord.ui.channel_select(
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="Select the Feedback channel (optional)..."
     )
@@ -605,7 +609,8 @@ class FeedbackChannelView(SetupBaseView):
 
 
 class WarningChannelView(SetupBaseView):
-    @discord.ui.channel_select(
+    @discord.ui.select(
+        cls=discord.ui.ChannelSelect,
         channel_types=[discord.ChannelType.text],
         placeholder="Select the Hydra warning channel..."
     )
