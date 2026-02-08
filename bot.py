@@ -1,3 +1,7 @@
+# ============================================================
+#  SECTION 1: IMPORTS, GLOBALS, CONSTANTS, DB, HELPERS
+# ============================================================
+
 import os
 import random
 import discord
@@ -13,7 +17,7 @@ TOKEN = os.getenv("TOKEN")
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.members = True   # <-- REQUIRED for bot visibility in member list
+intents.members = True   # REQUIRED for bot visibility in member list
 
 bot = commands.Bot(command_prefix="$", intents=intents)
 tree = bot.tree
@@ -22,7 +26,6 @@ scheduler = AsyncIOScheduler(timezone="Europe/London")
 # -----------------------------
 # CONSTANTS
 # -----------------------------
-# These act as defaults / fallbacks if no per-guild config is set.
 HYDRA_WARNING_CHANNEL_ID = 1461342242470887546
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
 SUGGESTION_CHANNEL_ID = 1464216800651640893
@@ -61,8 +64,15 @@ SHARD_RATES = {
     }
 }
 
+BASE_RATES = {
+    "ancient": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
+    "void": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
+    "primal": {"epic": 16.0, "legendary": 1.0, "mythical": 0.5},
+    "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}
+}
+
 # ============================================================
-#                DATABASE SETUP
+#  SECTION 2: DATABASE SETUP & HELPERS
 # ============================================================
 
 conn = sqlite3.connect("mercy.db")
@@ -97,16 +107,9 @@ CREATE TABLE IF NOT EXISTS guild_channels (
 
 conn.commit()
 
-BASE_RATES = {
-    "ancient": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
-    "void": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
-    "primal": {"epic": 16.0, "legendary": 1.0, "mythical": 0.5},
-    "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}
-}
-
-# ============================================================
-#                MERCY CALCULATION FUNCTIONS
-# ============================================================
+# -----------------------------
+# MERCY CALCULATION FUNCTIONS
+# -----------------------------
 
 def calc_epic_chance(shard_type, pity):
     if shard_type in ("ancient", "void"):
@@ -154,9 +157,9 @@ def calc_mythical_chance(shard_type, pity):
 
     return BASE_RATES[shard_type]["mythical"]
 
-# ============================================================
-#                DB HELPERS (MERCY + GUILD CHANNELS)
-# ============================================================
+# -----------------------------
+# DB HELPERS (MERCY + GUILD CHANNELS)
+# -----------------------------
 
 def get_mercy_row(user_id, shard_type):
     shard_type = shard_type.lower()
@@ -249,8 +252,42 @@ def get_default_suggestion_channel_id():
         return int(row[0])
     return SUGGESTION_CHANNEL_ID
 
+
+def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
+    """
+    Returns (color, ready_flag_bool, status_text_for_table)
+    Ready only if:
+      - Legendary > 74% (all shards)
+      - OR Mythical > 74% (primal only)
+    Epic is ignored for readiness.
+    """
+    if shard_type == "primal":
+        relevant = max(legendary_chance, mythical_chance or 0.0)
+    else:
+        relevant = legendary_chance
+
+    ready = False
+    if shard_type == "primal":
+        if (mythical_chance is not None and mythical_chance > 74.0) or legendary_chance > 74.0:
+            ready = True
+    else:
+        if legendary_chance > 74.0:
+            ready = True
+
+    if ready:
+        color = discord.Color.green()
+        status = "🟢 **Ready to pull**"
+    elif relevant > 20.0:
+        color = discord.Color.orange()
+        status = "🟡 Building up"
+    else:
+        color = discord.Color.red()
+        status = "🔴 Low mercy"
+
+    return color, ready, status
+
 # ============================================================
-#                COOLDOWN HANDLER
+#  SECTION 3: ERROR HANDLER & SCHEDULER TASKS
 # ============================================================
 
 @bot.event
@@ -260,19 +297,13 @@ async def on_command_error(ctx, error):
         return await msg.delete(delay=30)
     raise error
 
-# ============================================================
-#                HYDRA & CHIMERA WARNING SCHEDULER
-# ============================================================
 
 async def send_weekly_warning():
-    # Send to each guild's configured warning channel if set,
-    # otherwise fall back to the global HYDRA_WARNING_CHANNEL_ID (if it exists in that guild).
     for guild in bot.guilds:
         channels = get_guild_channels(guild.id)
         channel_id = channels["warning_channel_id"]
 
         if channel_id is None:
-            # Fallback: try the global constant if it belongs to this guild
             channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
             if channel and channel.guild.id == guild.id:
                 target_channel = channel
@@ -287,8 +318,8 @@ async def send_weekly_warning():
                 "Don't forget or you'll miss out on rewards!"
             )
 
+
 async def send_chimera_warning():
-    # Same per-guild logic as Hydra, but for Chimera.
     for guild in bot.guilds:
         channels = get_guild_channels(guild.id)
         channel_id = channels["warning_channel_id"]
@@ -308,39 +339,162 @@ async def send_chimera_warning():
                 "Don't forget or you'll miss out on rewards!"
             )
 
+# ============================================================
+#  SECTION 4: EVENT HANDLERS (READY, GUILD JOIN, MESSAGE)
+# ============================================================
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
     print("Hydra warning channel resolved (fallback):", channel)
 
-    # Start scheduler (ignore if already started)
     try:
         scheduler.start()
     except Exception:
         pass
 
-    # Jobs
-    # Hydra: Tuesday 10:00 UTC
     scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
-    # Chimera: Wednesday 11:00 UTC
     scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
 
-    # Sync slash commands
     try:
         await tree.sync()
         print("Slash commands synced.")
     except Exception as e:
         print(f"Failed to sync slash commands: {e}")
 
+
+@bot.event
+async def on_guild_join(guild):
+    # Welcome message when the bot joins a new server
+    channel = None
+    for ch in guild.text_channels:
+        if ch.permissions_for(guild.me).send_messages:
+            channel = ch
+            break
+
+    if channel:
+        await channel.send(
+            "Hello everyone! I am **Hydra Companion**, a multi‑platform toolkit for RAID: Shadow Legends players.\n\n"
+            "I provide accurate shard pity tracking, pull logging, and gacha simulation across:\n"
+            "• **Desktop (Live Beta)**\n"
+            "• **Android (Live Beta)**\n"
+            "• **Discord**\n\n"
+            "**Support Server**\n"
+            "If you ever need help with the bot, want to report a bug, or just have questions, you can join the support server here:\n"
+            "https://discord.gg/DuemMm57jr"
+        )
+
 # ============================================================
-#                BASIC PREFIX COMMANDS
+#  SECTION 5: VIEWS (BUTTONS & DM CONFIRMATION)
 # ============================================================
+
+class SuggestionConfirmView(discord.ui.View):
+    def __init__(self, user_id, suggestion):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.suggestion = suggestion
+
+    @discord.ui.button(label="Submit Anonymously", style=discord.ButtonStyle.green)
+    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
+
+        suggestion_channel_id = get_default_suggestion_channel_id()
+        channel = interaction.client.get_channel(suggestion_channel_id)
+
+        if not channel:
+            return await interaction.response.edit_message(
+                content="Suggestion channel is not configured correctly.",
+                view=None
+            )
+
+        embed = discord.Embed(
+            title="💡 New Anonymous Suggestion (DM)",
+            description=self.suggestion,
+            color=discord.Color.green()
+        )
+        embed.set_footer(text="Anonymous submission")
+
+        await channel.send(embed=embed)
+        await interaction.response.edit_message(
+            content="Your anonymous suggestion has been submitted.",
+            view=None
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
+
+        await interaction.response.edit_message(
+            content="Your suggestion has been cancelled.",
+            view=None
+        )
+
+
+class MessageMeButton(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Message Me", style=discord.ButtonStyle.primary)
+    async def message_me(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            await interaction.user.send(
+                "Hi! You can send me an anonymous suggestion here anytime."
+            )
+            await interaction.response.send_message(
+                "I've sent you a DM.", ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.response.send_message(
+                "I couldn't DM you! Please enable DMs from server members.",
+                ephemeral=True
+            )
+
+# ============================================================
+#  SECTION 6: on_message (ANONYMOUS SUGGESTIONS)
+# ============================================================
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+
+    if isinstance(message.channel, discord.DMChannel):
+        suggestion = message.content
+
+        async with message.channel.typing():
+            embed = discord.Embed(
+                title="Confirm Anonymous Suggestion",
+                description=(
+                    "You wrote:\n\n"
+                    f"**{suggestion}**\n\n"
+                    "Would you like to submit this anonymously?"
+                ),
+                color=discord.Color.blue()
+            )
+
+            view = SuggestionConfirmView(message.author.id, suggestion)
+
+            await message.author.send(embed=embed, view=view)
+        return
+
+    await bot.process_commands(message)
+
+# ============================================================
+#  SECTION 7: PREFIX COMMANDS
+# ============================================================
+
+# -----------------------------
+# BASIC PREFIX COMMANDS
+# -----------------------------
 
 @bot.command()
 async def test(ctx):
     await ctx.message.delete()
     await ctx.send("Hydra warning test successful.")
+
 
 @bot.command()
 async def chests(ctx):
@@ -354,9 +508,32 @@ async def chests(ctx):
     await ctx.send(message)
     await ctx.message.delete()
 
-# ============================================================
-#                REMINDER SYSTEM (PREFIX)
-# ============================================================
+# -----------------------------
+# SUPPORT & DEVELOPER (PREFIX)
+# -----------------------------
+
+@bot.command(name="support")
+async def support_prefix(ctx):
+    await ctx.send(
+        "**Support Server**\n"
+        "If you need help with Hydra Companion, join here:\n"
+        "https://discord.gg/DuemMm57jr"
+    )
+
+
+@bot.command(name="developer")
+async def developer_prefix(ctx):
+    await ctx.send(
+        "**Hydra Companion Developer Resources**\n\n"
+        "**GitHub Profile:** https://github.com/sketeraid\n"
+        "**Desktop App (Beta):** https://github.com/sketeraid/HydraCompanionApp\n"
+        "**Discord Bot:** https://github.com/sketeraid/HydraCompanion-Discord-Bot\n"
+        "**Android App (Beta):** https://github.com/sketeraid/HydraCompanionAndroidAPK"
+    )
+
+# -----------------------------
+# REMINDER SYSTEM (PREFIX)
+# -----------------------------
 
 @bot.command()
 async def remindme(ctx, time: str, *, reminder: str = None):
@@ -407,6 +584,7 @@ async def remindme(ctx, time: str, *, reminder: str = None):
 
     reminders[user_id] = [r for r in reminders[user_id] if r["id"] != reminder_id]
 
+
 @bot.command(name="reminders")
 async def list_reminders(ctx):
     await ctx.message.delete()
@@ -422,6 +600,7 @@ async def list_reminders(ctx):
         message += f"• #{r['id']} – {r['text']} (in {r['time']})\n"
 
     await ctx.send(message)
+
 
 @bot.command()
 async def cancelreminder(ctx, reminder_id: int):
@@ -442,9 +621,9 @@ async def cancelreminder(ctx, reminder_id: int):
     else:
         await ctx.send(f"❎ Reminder #{reminder_id} cancelled.")
 
-# ============================================================
-#                SHOULD I PULL? (PREFIX)
-# ============================================================
+# -----------------------------
+# SHOULD I PULL? (PREFIX)
+# -----------------------------
 
 @bot.command(name="pull")
 async def should_i_pull(ctx, *, event: str = None):
@@ -486,9 +665,9 @@ async def should_i_pull(ctx, *, event: str = None):
 
     await ctx.send(embed=embed)
 
-# ============================================================
-#                GACHA SIMULATOR (PREFIX)
-# ============================================================
+# -----------------------------
+# GACHA SIMULATOR (PREFIX)
+# -----------------------------
 
 def roll_from_rates(rates: dict):
     r = random.uniform(0, 100)
@@ -498,6 +677,7 @@ def roll_from_rates(rates: dict):
         if r <= cumulative:
             return rarity
     return list(rates.keys())[-1]
+
 
 @bot.command(name="sim")
 @commands.cooldown(1, 30, commands.BucketType.user)
@@ -542,43 +722,9 @@ async def gacha_sim(ctx, shard_type: str = None):
 
     await ctx.send(embed=embed)
 
-# ============================================================
-#                MERCY PREFIX COMMANDS
-# ============================================================
-
-def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
-    """
-    Returns (color, ready_flag_bool, status_text_for_table)
-    Ready only if:
-      - Legendary > 74% (all shards)
-      - OR Mythical > 74% (primal only)
-    Epic is ignored for readiness.
-    """
-    # Determine the "relevant" highest chance for status (legendary / mythical)
-    if shard_type == "primal":
-        relevant = max(legendary_chance, mythical_chance or 0.0)
-    else:
-        relevant = legendary_chance
-
-    ready = False
-    if shard_type == "primal":
-        if (mythical_chance is not None and mythical_chance > 74.0) or legendary_chance > 74.0:
-            ready = True
-    else:
-        if legendary_chance > 74.0:
-            ready = True
-
-    if ready:
-        color = discord.Color.green()
-        status = "🟢 **Ready to pull**"
-    elif relevant > 20.0:
-        color = discord.Color.orange()
-        status = "🟡 Building up"
-    else:
-        color = discord.Color.red()
-        status = "🔴 Low mercy"
-
-    return color, ready, status
+# -----------------------------
+# MERCY PREFIX COMMANDS
+# -----------------------------
 
 @bot.command(name="mercy")
 async def mercy_cmd(ctx, shard_type: str):
@@ -628,6 +774,7 @@ async def mercy_cmd(ctx, shard_type: str):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="mercyall")
 async def mercy_all_cmd(ctx):
     user = ctx.author.id
@@ -661,6 +808,7 @@ async def mercy_all_cmd(ctx):
         embed.add_field(name=shard.capitalize(), value=text, inline=False)
 
     await ctx.send(embed=embed)
+
 
 @bot.command(name="mercytable")
 async def mercy_table_cmd(ctx):
@@ -700,6 +848,7 @@ async def mercy_table_cmd(ctx):
         )
 
     await ctx.send(embed=embed)
+
 
 @bot.command(name="mercycompare")
 async def mercy_compare_cmd(ctx, member: discord.Member):
@@ -769,6 +918,7 @@ async def mercy_compare_cmd(ctx, member: discord.Member):
 
     await ctx.send(embed=embed)
 
+
 @bot.command(name="clearmercy")
 async def clear_mercy_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -777,6 +927,7 @@ async def clear_mercy_cmd(ctx, shard_type: str):
 
     set_mercy_row(ctx.author.id, shard_type, 0, 0, 0)
     await ctx.send(f"{ctx.author.mention}, your {shard_type} mercy has been reset.")
+
 
 @bot.command(name="addepic")
 async def add_epic_cmd(ctx, shard_type: str):
@@ -794,6 +945,7 @@ async def add_epic_cmd(ctx, shard_type: str):
     set_mercy_row(ctx.author.id, shard_type, epic, legendary, mythical)
     await ctx.send(f"{ctx.author.mention}, **Epic** recorded for {shard_type}.")
 
+
 @bot.command(name="addlegendary")
 async def add_legendary_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -810,6 +962,7 @@ async def add_legendary_cmd(ctx, shard_type: str):
     set_mercy_row(ctx.author.id, shard_type, epic, legendary, mythical)
     await ctx.send(f"{ctx.author.mention}, **Legendary** recorded for {shard_type}.")
 
+
 @bot.command(name="addmythical")
 async def add_mythical_cmd(ctx, shard_type: str):
     shard_type = shard_type.lower()
@@ -824,6 +977,7 @@ async def add_mythical_cmd(ctx, shard_type: str):
 
     set_mercy_row(ctx.author.id, shard_type, epic, legendary, mythical)
     await ctx.send(f"{ctx.author.mention}, **Mythical** recorded for primal.")
+
 
 @bot.command(name="addpull")
 async def add_pull_cmd(ctx, shard_type: str, amount: int):
@@ -859,9 +1013,9 @@ async def add_pull_cmd(ctx, shard_type: str, amount: int):
 
     await ctx.send(msg)
 
-# ============================================================
-#                PURGE COMMAND (PREFIX ADMIN)
-# ============================================================
+# -----------------------------
+# PURGE COMMAND (PREFIX ADMIN)
+# -----------------------------
 
 @bot.command(name="purge")
 @commands.has_permissions(administrator=True)
@@ -877,6 +1031,7 @@ async def purge_cmd(ctx, amount: int):
     confirm = await ctx.send(f"Deleted {len(deleted)} messages.")
     await confirm.delete(delay=5)
 
+
 @purge_cmd.error
 async def purge_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -887,9 +1042,9 @@ async def purge_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
-# ============================================================
-#                ANNOUNCE COMMAND (PREFIX ADMIN)
-# ============================================================
+# -----------------------------
+# ANNOUNCE COMMAND (PREFIX ADMIN)
+# -----------------------------
 
 @bot.command(name="announce")
 @commands.has_permissions(administrator=True)
@@ -913,6 +1068,7 @@ async def announce_cmd(ctx, *, message: str):
 
     await channel.send(embed=embed)
 
+
 @announce_cmd.error
 async def announce_error(ctx, error):
     if isinstance(error, commands.MissingPermissions):
@@ -923,107 +1079,9 @@ async def announce_error(ctx, error):
         choice = random.choice(responses)
         await ctx.send(choice)
 
-# ============================================================
-#                DM SUGGESTION CONFIRMATION VIEW
-# ============================================================
-
-class SuggestionConfirmView(discord.ui.View):
-    def __init__(self, user_id, suggestion):
-        super().__init__(timeout=120)
-        self.user_id = user_id
-        self.suggestion = suggestion
-
-    @discord.ui.button(label="Submit Anonymously", style=discord.ButtonStyle.green)
-    async def submit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
-
-        # Use configured suggestion channel if available (single main guild assumption),
-        # otherwise fall back to SUGGESTION_CHANNEL_ID.
-        suggestion_channel_id = get_default_suggestion_channel_id()
-        channel = interaction.client.get_channel(suggestion_channel_id)
-
-        if not channel:
-            return await interaction.response.edit_message(
-                content="Suggestion channel is not configured correctly.",
-                view=None
-            )
-
-        embed = discord.Embed(
-            title="💡 New Anonymous Suggestion (DM)",
-            description=self.suggestion,
-            color=discord.Color.green()
-        )
-        embed.set_footer(text="Anonymous submission")
-
-        await channel.send(embed=embed)
-        await interaction.response.edit_message(
-            content="Your anonymous suggestion has been submitted.",
-            view=None
-        )
-
-    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
-    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
-
-        await interaction.response.edit_message(
-            content="Your suggestion has been cancelled.",
-            view=None
-        )
-
-# ============================================================
-#                ANONYMOUS SUGGESTIONS (DM)
-# ============================================================
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    if isinstance(message.channel, discord.DMChannel):
-        suggestion = message.content
-
-        async with message.channel.typing():
-            embed = discord.Embed(
-                title="Confirm Anonymous Suggestion",
-                description=(
-                    "You wrote:\n\n"
-                    f"**{suggestion}**\n\n"
-                    "Would you like to submit this anonymously?"
-                ),
-                color=discord.Color.blue()
-            )
-
-            view = SuggestionConfirmView(message.author.id, suggestion)
-
-            await message.author.send(embed=embed, view=view)
-        return
-
-    await bot.process_commands(message)
-
-# ============================================================
-#                SUGGEST BUTTON COMMAND (PREFIX ADMIN)
-# ============================================================
-
-class MessageMeButton(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Message Me", style=discord.ButtonStyle.primary)
-    async def message_me(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            await interaction.user.send(
-                "Hi! You can send me an anonymous suggestion here anytime."
-            )
-            await interaction.response.send_message(
-                "I've sent you a DM.", ephemeral=True
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "I couldn't DM you! Please enable DMs from server members.",
-                ephemeral=True
-            )
+# -----------------------------
+# SUGGEST BUTTON COMMAND (PREFIX ADMIN)
+# -----------------------------
 
 @bot.command(name="suggestbutton")
 @commands.has_permissions(administrator=True)
@@ -1042,9 +1100,9 @@ async def suggest_button_cmd(ctx):
 
     await ctx.send(embed=embed, view=MessageMeButton())
 
-# ============================================================
-#                NEW PREFIX ADMIN CHANNEL SETTERS
-# ============================================================
+# -----------------------------
+# NEW PREFIX ADMIN CHANNEL SETTERS
+# -----------------------------
 
 @bot.command(name="setchannelwarning")
 @commands.has_permissions(administrator=True)
@@ -1052,11 +1110,13 @@ async def set_channel_warning_prefix(ctx, channel: discord.TextChannel):
     set_guild_channel(ctx.guild.id, "warning_channel_id", channel.id)
     await ctx.send(f"Hydra warning channel set to {channel.mention}.")
 
+
 @bot.command(name="setchannelsuggestion")
 @commands.has_permissions(administrator=True)
 async def set_channel_suggestion_prefix(ctx, channel: discord.TextChannel):
     set_guild_channel(ctx.guild.id, "suggestion_channel_id", channel.id)
     await ctx.send(f"Suggestion channel set to {channel.mention}.")
+
 
 @bot.command(name="setchannelfeedback")
 @commands.has_permissions(administrator=True)
@@ -1064,15 +1124,16 @@ async def set_channel_feedback_prefix(ctx, channel: discord.TextChannel):
     set_guild_channel(ctx.guild.id, "feedback_channel_id", channel.id)
     await ctx.send(f"Feedback channel set to {channel.mention}.")
 
+
 @bot.command(name="setchannelcommands")
 @commands.has_permissions(administrator=True)
 async def set_channel_commands_prefix(ctx, channel: discord.TextChannel):
     set_guild_channel(ctx.guild.id, "commands_channel_id", channel.id)
     await ctx.send(f"Commands guide channel set to {channel.mention}.")
 
-# ============================================================
-#                COMMAND GUIDE (PREFIX)
-# ============================================================
+# -----------------------------
+# COMMAND GUIDE (PREFIX)
+# -----------------------------
 
 def build_commands_guide_embed():
     embed = discord.Embed(
@@ -1162,10 +1223,9 @@ def build_commands_guide_embed():
 
     return embed
 
+
 @bot.command(name="commands")
 async def commands_prefix(ctx):
-    # Send the commands guide embed to the configured commands channel if set,
-    # otherwise send it in the current channel.
     if ctx.guild:
         channels = get_guild_channels(ctx.guild.id)
         commands_channel_id = channels["commands_channel_id"]
@@ -1179,9 +1239,9 @@ async def commands_prefix(ctx):
     embed = build_commands_guide_embed()
     await channel.send(embed=embed)
 
-# ============================================================
-#                MERCY GUIDE (PREFIX ADMIN)
-# ============================================================
+# -----------------------------
+# MERCY GUIDE (PREFIX ADMIN)
+# -----------------------------
 
 def build_mercy_guide_embed():
     embed = discord.Embed(
@@ -1305,6 +1365,7 @@ def build_mercy_guide_embed():
 
     return embed
 
+
 @bot.command(name="mercyguide")
 @commands.has_permissions(administrator=True)
 async def mercy_guide_prefix(ctx):
@@ -1312,12 +1373,13 @@ async def mercy_guide_prefix(ctx):
     await ctx.send(embed=embed)
 
 # ============================================================
-#                SLASH COMMANDS (GROUPED)
+#  SECTION 8: SLASH COMMANDS (GROUPS & STANDALONE)
 # ============================================================
 
 # -----------------------------
 # AUTOCOMPLETE HELPERS
 # -----------------------------
+
 async def shard_autocomplete(
     interaction: discord.Interaction,
     current: str
@@ -1330,8 +1392,9 @@ async def shard_autocomplete(
     ]
 
 # -----------------------------
-# MERCY GROUP
+# MERCY GROUP (SLASH)
 # -----------------------------
+
 mercy_group = app_commands.Group(
     name="mercy",
     description="Mercy tracking and comparison commands."
@@ -1393,6 +1456,7 @@ async def mercy_check(
 
     await interaction.response.send_message(embed=embed)
 
+
 @mercy_group.command(name="table", description="Show your mercy table for all shards.")
 async def mercy_table_slash(interaction: discord.Interaction):
     user = interaction.user.id
@@ -1432,6 +1496,7 @@ async def mercy_table_slash(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
+
 @mercy_group.command(name="all", description="Show a full mercy overview for all shards.")
 async def mercy_all_slash(interaction: discord.Interaction):
     user = interaction.user.id
@@ -1465,6 +1530,7 @@ async def mercy_all_slash(interaction: discord.Interaction):
         embed.add_field(name=shard.capitalize(), value=text, inline=False)
 
     await interaction.response.send_message(embed=embed)
+
 
 @mercy_group.command(name="compare", description="Compare your mercy with another user.")
 @app_commands.describe(member="User to compare with")
@@ -1538,6 +1604,7 @@ async def mercy_compare_slash(
 
     await interaction.response.send_message(embed=embed)
 
+
 @mercy_group.command(name="add-pull", description="Add pulls to your mercy for a shard.")
 @app_commands.describe(
     shard_type="Shard type: ancient, void, primal, sacred",
@@ -1587,6 +1654,7 @@ async def mercy_add_pull_slash(
 
     await interaction.response.send_message(msg)
 
+
 @mercy_group.command(name="add-epic", description="Record an epic pull for a shard.")
 @app_commands.describe(shard_type="Shard type: ancient, void, primal, sacred")
 @app_commands.autocomplete(shard_type=shard_autocomplete)
@@ -1612,6 +1680,7 @@ async def mercy_add_epic_slash(
     await interaction.response.send_message(
         f"{interaction.user.mention}, **Epic** recorded for {shard_type}."
     )
+
 
 @mercy_group.command(name="add-legendary", description="Record a legendary pull for a shard.")
 @app_commands.describe(shard_type="Shard type: ancient, void, primal, sacred")
@@ -1639,6 +1708,7 @@ async def mercy_add_legendary_slash(
         f"{interaction.user.mention}, **Legendary** recorded for {shard_type}."
     )
 
+
 @mercy_group.command(name="add-mythical", description="Record a mythical pull (primal only).")
 @app_commands.describe(shard_type="Must be primal")
 async def mercy_add_mythical_slash(
@@ -1663,6 +1733,7 @@ async def mercy_add_mythical_slash(
         f"{interaction.user.mention}, **Mythical** recorded for primal."
     )
 
+
 @mercy_group.command(name="clear", description="Clear your mercy for a shard.")
 @app_commands.describe(shard_type="Shard type: ancient, void, primal, sacred")
 @app_commands.autocomplete(shard_type=shard_autocomplete)
@@ -1683,8 +1754,9 @@ async def mercy_clear_slash(
     )
 
 # -----------------------------
-# REMINDER GROUP
+# REMINDER GROUP (SLASH)
 # -----------------------------
+
 reminder_group = app_commands.Group(
     name="reminder",
     description="Set and manage reminders."
@@ -1753,6 +1825,7 @@ async def reminder_set(
 
     bot.loop.create_task(reminder_task())
 
+
 @reminder_group.command(name="list", description="List your active reminders.")
 async def reminder_list(interaction: discord.Interaction):
     user_id = interaction.user.id
@@ -1768,6 +1841,7 @@ async def reminder_list(interaction: discord.Interaction):
         message += f"• #{r['id']} – {r['text']} (in {r['time']})\n"
 
     await interaction.response.send_message(message, ephemeral=True)
+
 
 @reminder_group.command(name="cancel", description="Cancel a reminder by ID.")
 @app_commands.describe(reminder_id="The reminder ID to cancel")
@@ -1799,8 +1873,9 @@ async def reminder_cancel(
         )
 
 # -----------------------------
-# GACHA GROUP
+# GACHA GROUP (SLASH)
 # -----------------------------
+
 gacha_group = app_commands.Group(
     name="gacha",
     description="Gacha simulator and pull advice."
@@ -1848,6 +1923,7 @@ async def gacha_simulate_slash(
 
     await interaction.response.send_message(embed=embed)
 
+
 @gacha_group.command(name="pull-advice", description="Ask if you should pull.")
 @app_commands.describe(event="Optional event or banner name")
 async def gacha_pull_advice_slash(
@@ -1891,8 +1967,9 @@ async def gacha_pull_advice_slash(
     await interaction.response.send_message(embed=embed)
 
 # -----------------------------
-# ADMIN GROUP (ADMIN-ONLY)
+# ADMIN GROUP (SLASH, ADMIN-ONLY)
 # -----------------------------
+
 admin_group = app_commands.Group(
     name="admin",
     description="Admin-only tools.",
@@ -1930,6 +2007,7 @@ async def admin_announce_slash(
     await channel.send(embed=embed)
     await interaction.response.send_message("Announcement sent.", ephemeral=True)
 
+
 @admin_group.command(name="purge", description="Purge a number of messages in this channel.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(amount="Number of messages to delete")
@@ -1954,6 +2032,7 @@ async def admin_purge_slash(
         f"Deleted {len(deleted)} messages.",
         ephemeral=True
     )
+
 
 @admin_group.command(name="suggest-button", description="Post the anonymous suggestion button.")
 @app_commands.default_permissions(administrator=True)
@@ -2006,6 +2085,7 @@ async def admin_set_channel_warning_slash(
         ephemeral=True
     )
 
+
 @admin_group.command(name="set-channel-suggestion", description="Set the suggestion channel.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where suggestions will be posted")
@@ -2025,6 +2105,7 @@ async def admin_set_channel_suggestion_slash(
         ephemeral=True
     )
 
+
 @admin_group.command(name="set-channel-feedback", description="Set the feedback channel.")
 @app_commands.default_permissions(administrator=True)
 @app_commands.describe(channel="Channel where feedback will be posted")
@@ -2043,6 +2124,7 @@ async def admin_set_channel_feedback_slash(
         f"Feedback channel set to {channel.mention}.",
         ephemeral=True
     )
+
 
 @admin_group.command(name="set-channel-commands", description="Set the commands guide channel.")
 @app_commands.default_permissions(administrator=True)
@@ -2092,6 +2174,7 @@ async def admin_commands_guide_slash(
         ephemeral=True
     )
 
+
 @admin_group.command(name="mercy-guide", description="Post the mercy tracking guide embed.")
 @app_commands.default_permissions(administrator=True)
 async def admin_mercy_guide_slash(
@@ -2110,17 +2193,36 @@ async def admin_mercy_guide_slash(
         ephemeral=True
     )
 
+# -----------------------------
+# STANDALONE SLASH: SUPPORT & DEVELOPER
+# -----------------------------
+
+@tree.command(name="support", description="Get the Hydra Companion support server link.")
+async def support_slash(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "**Support Server**\n"
+        "If you need help with Hydra Companion, join here:\n"
+        "https://discord.gg/DuemMm57jr"
+    )
+
+
+@tree.command(name="developer", description="Links to Hydra Companion developer resources.")
+async def developer_slash(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "**Hydra Companion Developer Resources**\n\n"
+        "**GitHub Profile:** https://github.com/sketeraid\n"
+        "**Desktop App (Beta):** https://github.com/sketeraid/HydraCompanionApp\n"
+        "**Discord Bot:** https://github.com/sketeraid/HydraCompanion-Discord-Bot\n"
+        "**Android App (Beta):** https://github.com/sketeraid/HydraCompanionAndroidAPK"
+    )
+
 # ============================================================
-#                REGISTER GROUPS WITH TREE
+#  SECTION 9: REGISTER GROUPS & RUN BOT
 # ============================================================
 
 tree.add_command(mercy_group)
 tree.add_command(reminder_group)
 tree.add_command(gacha_group)
 tree.add_command(admin_group)
-
-# ============================================================
-#                RUN BOT
-# ============================================================
 
 bot.run(TOKEN)
