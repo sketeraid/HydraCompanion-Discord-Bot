@@ -340,22 +340,18 @@ class CommandsChannelView(SetupBaseView):
         placeholder="Select the Commands Guide channel..."
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
-        channel = select.values[0]
+        selected = select.values[0]  # AppCommandChannel
+        channel = interaction.guild.get_channel(selected.id)  # Convert to real channel
 
-        # Save to DB
         set_guild_channel(self.guild.id, "commands_channel_id", channel.id)
         self.state["commands_channel"] = channel
 
-        # Acknowledge FIRST
         await interaction.response.edit_message(
             content=f"Commands Guide channel set to {channel.mention}.",
             view=None
         )
 
-        # THEN send the embed
         await channel.send(embed=build_commands_guide_embed())
-
-        # Move to next step
         await start_mercy_step(interaction, self.state)
 
 
@@ -370,7 +366,8 @@ class MercyChannelView(SetupBaseView):
         placeholder="Select the Mercy Guide channel..."
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
-        channel = select.values[0]
+        selected = select.values[0]
+        channel = interaction.guild.get_channel(selected.id)
 
         set_guild_channel(self.guild.id, "mercy_channel_id", channel.id)
         self.state["mercy_channel"] = channel
@@ -395,7 +392,8 @@ class SuggestionChannelView(SetupBaseView):
         placeholder="Select the Suggestion channel (optional)..."
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
-        channel = select.values[0]
+        selected = select.values[0]
+        channel = interaction.guild.get_channel(selected.id)
 
         set_guild_channel(self.guild.id, "suggestion_channel_id", channel.id)
         self.state["suggestion_channel"] = channel
@@ -441,7 +439,8 @@ class FeedbackChannelView(SetupBaseView):
         placeholder="Select the Feedback channel (optional)..."
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
-        channel = select.values[0]
+        selected = select.values[0]
+        channel = interaction.guild.get_channel(selected.id)
 
         set_guild_channel(self.guild.id, "feedback_channel_id", channel.id)
         self.state["feedback_channel"] = channel
@@ -477,7 +476,8 @@ class WarningChannelView(SetupBaseView):
         placeholder="Select the Hydra Warning channel..."
     )
     async def select_channel(self, interaction: discord.Interaction, select: discord.ui.Select):
-        channel = select.values[0]
+        selected = select.values[0]
+        channel = interaction.guild.get_channel(selected.id)
 
         set_guild_channel(self.guild.id, "warning_channel_id", channel.id)
         self.state["warning_channel"] = channel
