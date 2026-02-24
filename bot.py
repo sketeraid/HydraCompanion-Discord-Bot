@@ -156,8 +156,12 @@ def ensure_guild_row(guild_id):
 
 def set_guild_channel(guild_id, field, channel_id):
     ensure_guild_row(guild_id)
-    c.execute(f"UPDATE guild_channels SET {field}=? WHERE guild_id=?", (channel_id, str(guild_id)))
+    c.execute(
+        f"UPDATE guild_channels SET {field}=? WHERE guild_id=?",
+        (channel_id, str(guild_id))
+    )
     conn.commit()
+
 
 def get_guild_channels(guild_id):
     c.execute("""
@@ -165,7 +169,9 @@ def get_guild_channels(guild_id):
                commands_channel_id, mercy_channel_id
         FROM guild_channels WHERE guild_id=?
     """, (str(guild_id),))
+
     row = c.fetchone()
+
     if row is None:
         return {
             "warning_channel_id": None,
@@ -174,6 +180,7 @@ def get_guild_channels(guild_id):
             "commands_channel_id": None,
             "mercy_channel_id": None
         }
+
     return {
         "warning_channel_id": row[0],
         "suggestion_channel_id": row[1],
@@ -182,21 +189,28 @@ def get_guild_channels(guild_id):
         "mercy_channel_id": row[4]
     }
 
+
 def get_default_feedback_channel_id():
-    c.execute("SELECT feedback_channel_id FROM guild_channels WHERE feedback_channel_id IS NOT NULL LIMIT 1")
+    c.execute(
+        "SELECT feedback_channel_id FROM guild_channels "
+        "WHERE feedback_channel_id IS NOT NULL LIMIT 1"
+    )
     row = c.fetchone()
     if row and row[0]:
         return int(row[0])
     return SUGGESTION_CHANNEL_ID
 
+
 def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chance=None):
     relevant = mythical_chance if shard_type == "primal" else legendary_chance
     ready = relevant > 74.0
+
     if ready:
         return discord.Color.green(), True, "🟢 **Ready to pull**"
     if relevant > 20.0:
         return discord.Color.orange(), False, "🟡 Building up"
     return discord.Color.red(), False, "🔴 Low mercy"
+
 
 # ============================================================
 #  SECTION 3.5: SCHEDULER WARNING TASKS
@@ -205,43 +219,39 @@ def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chan
 async def send_weekly_warning():
     for guild in bot.guilds:
         channels = get_guild_channels(guild.id)
-        channel_id = channels["warning_channel_id"]
+        channel_id = channels.get("warning_channel_id")
 
-        if channel_id is None:
-            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
-            if channel and channel.guild.id == guild.id:
-                target_channel = channel
-            else:
-                continue
-        else:
-            target_channel = guild.get_channel(channel_id)
+        # Skip servers without a configured warning channel
+        if not channel_id:
+            continue
 
-        if target_channel:
-            await target_channel.send(
-                "@everyone 24 HOUR WARNING FOR HYDRA CLASH, "
-                "Don't forget or you'll miss out on rewards!"
-            )
+        target_channel = guild.get_channel(channel_id)
+        if not target_channel:
+            continue  # channel deleted or missing permissions
+
+        await target_channel.send(
+            "@everyone 24 HOUR WARNING FOR HYDRA CLASH, "
+            "Don't forget or you'll miss out on rewards!"
+        )
 
 
 async def send_chimera_warning():
     for guild in bot.guilds:
         channels = get_guild_channels(guild.id)
-        channel_id = channels["warning_channel_id"]
+        channel_id = channels.get("warning_channel_id")
 
-        if channel_id is None:
-            channel = bot.get_channel(HYDRA_WARNING_CHANNEL_ID)
-            if channel and channel.guild.id == guild.id:
-                target_channel = channel
-            else:
-                continue
-        else:
-            target_channel = guild.get_channel(channel_id)
+        if not channel_id:
+            continue
 
-        if target_channel:
-            await target_channel.send(
-                "@everyone 24 HOUR WARNING FOR CHIMERA CLASH, "
-                "Don't forget or you'll miss out on rewards!"
-            )
+        target_channel = guild.get_channel(channel_id)
+        if not target_channel:
+            continue
+
+        await target_channel.send(
+            "@everyone 24 HOUR WARNING FOR CHIMERA CLASH, "
+            "Don't forget or you'll miss out on rewards!"
+        )
+
 
 # ============================================================
 #  SECTION 4: EVENTS
@@ -250,16 +260,20 @@ async def send_chimera_warning():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
+
     try:
         scheduler.start()
     except Exception:
         pass
+
     scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
     scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
+
     try:
         await bot.tree.sync()
     except Exception as e:
         print("Slash sync failed:", e)
+
 
 @bot.event
 async def on_guild_join(guild):
@@ -270,7 +284,6 @@ async def on_guild_join(guild):
                 "Support server: https://discord.gg/DuemMm57jr"
             )
             break
-
 # ============================================================
 #  SECTION 5: VIEWS (START)
 # ============================================================
