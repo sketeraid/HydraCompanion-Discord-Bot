@@ -266,7 +266,7 @@ async def on_ready():
     except Exception:
         pass
 
-    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=10, minute=0)
+    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=11, minute=0)
     scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
 
     try:
