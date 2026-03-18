@@ -26,6 +26,10 @@ scheduler = AsyncIOScheduler(timezone="Europe/London")
 HYDRA_WARNING_CHANNEL_ID = 1461342242470887546
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
 SUGGESTION_CHANNEL_ID = 1464216800651640893
+KEY_REPORT_CHANNEL_ID = 1483798122931949598
+
+HYDRA_MAX_KEYS = 3
+CHIMERA_MAX_KEYS = 2
 
 ALLOWED_SUGGEST_BUTTON_CHANNELS = {
     1463963533640335423,
@@ -82,6 +86,18 @@ try:
     conn.commit()
 except sqlite3.OperationalError:
     pass
+
+# Key usage table
+c.execute("""
+CREATE TABLE IF NOT EXISTS keys (
+    user_id TEXT PRIMARY KEY,
+    username TEXT,
+    hydra_used INTEGER DEFAULT 0,
+    chimera_used INTEGER DEFAULT 0
+)
+""")
+
+conn.commit()
 
 conn.commit()
 
@@ -211,6 +227,34 @@ def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chan
         return discord.Color.orange(), False, "🟡 Building up"
     return discord.Color.red(), False, "🔴 Low mercy"
 
+# ============================================================
+#  KEY TRACKING HELPERS
+# ============================================================
+
+def get_key_row(user_id, username):
+    c.execute("SELECT hydra_used, chimera_used FROM keys WHERE user_id=?", (str(user_id),))
+    row = c.fetchone()
+    if row is None:
+        c.execute(
+            "INSERT INTO keys (user_id, username, hydra_used, chimera_used) VALUES (?, ?, 0, 0)",
+            (str(user_id), username)
+        )
+        conn.commit()
+        return 0, 0
+    return row
+
+
+def set_key_row(user_id, username, hydra_used, chimera_used):
+    c.execute("""
+        INSERT INTO keys (user_id, username, hydra_used, chimera_used)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(user_id) DO UPDATE SET
+            username=excluded.username,
+            hydra_used=excluded.hydra_used,
+            chimera_used=excluded.chimera_used
+    """, (str(user_id), username, hydra_used, chimera_used))
+    conn.commit()
+
 
 # ============================================================
 #  SECTION 3.5: SCHEDULER WARNING TASKS
@@ -252,6 +296,44 @@ async def send_chimera_warning():
             "Don't forget or you'll miss out on rewards!"
         )
 
+# ============================================================
+#  WEEKLY KEY REPORT + RESET TASKS
+# ============================================================
+
+async def send_hydra_key_report_and_reset():
+    channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
+    if not channel:
+        return
+
+    c.execute("SELECT username, hydra_used FROM keys")
+    rows = c.fetchall()
+
+    if not rows:
+        await channel.send("Hydra key report: no data recorded this week.")
+    else:
+        lines = [f"{username}: {used}/{HYDRA_MAX_KEYS} used" for username, used in rows]
+        await channel.send("**Weekly Hydra Key Usage Report**\n" + "\n".join(lines))
+
+    c.execute("UPDATE keys SET hydra_used = 0")
+    conn.commit()
+
+
+async def send_chimera_key_report_and_reset():
+    channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
+    if not channel:
+        return
+
+    c.execute("SELECT username, chimera_used FROM keys")
+    rows = c.fetchall()
+
+    if not rows:
+        await channel.send("Chimera key report: no data recorded this week.")
+    else:
+        lines = [f"{username}: {used}/{CHIMERA_MAX_KEYS} used" for username, used in rows]
+        await channel.send("**Weekly Chimera Key Usage Report**\n" + "\n".join(lines))
+
+    c.execute("UPDATE keys SET chimera_used = 0")
+    conn.commit()
 
 # ============================================================
 #  SECTION 4: EVENTS
@@ -273,6 +355,24 @@ async def on_ready():
         await bot.tree.sync()
     except Exception as e:
         print("Slash sync failed:", e)
+
+    # Hydra keys reset + report — Wednesday 11:00 UTC
+    scheduler.add_job(
+        send_hydra_key_report_and_reset,
+        "cron",
+        day_of_week="wed",
+        hour=10,
+        minute=59
+    )
+
+    # Chimera keys reset + report — Friday 11:00 UTC
+    scheduler.add_job(
+        send_chimera_key_report_and_reset,
+        "cron",
+        day_of_week="thu",
+        hour=11,
+        minute=0
+    )
 
 
 @bot.event
@@ -1183,6 +1283,99 @@ async def shard_autocomplete(interaction, current):
         app_commands.Choice(name=s.capitalize(), value=s)
         for s in SHARD_CHOICES if current in s
     ]
+
+keys_group = app_commands.Group(
+    name="keys",
+    description="Track Hydra and Chimera key usage."
+)
+
+@keys_group.command(
+    name="add",
+    description="Record a used Hydra or Chimera key."
+)
+@app_commands.describe(boss="Which boss the key was used on.")
+@app_commands.choices(
+    boss=[
+        app_commands.Choice(name="Hydra", value="hydra"),
+        app_commands.Choice(name="Chimera", value="chimera")
+    ]
+)
+async def keys_add_slash(interaction, boss: app_commands.Choice[str]):
+    user = interaction.user
+    hydra_used, chimera_used = get_key_row(user.id, user.display_name)
+
+    if boss.value == "hydra":
+        if hydra_used >= HYDRA_MAX_KEYS:
+            return await interaction.response.send_message(
+                f"{user.mention} has no Hydra keys remaining.",
+                ephemeral=True
+            )
+        hydra_used += 1
+        remaining = HYDRA_MAX_KEYS - hydra_used
+        set_key_row(user.id, user.display_name, hydra_used, chimera_used)
+        return await interaction.response.send_message(
+            f"Hydra key consumed! Only {remaining}/{HYDRA_MAX_KEYS} keys remain, warrior.",
+            ephemeral=True
+        )
+
+    if boss.value == "chimera":
+        if chimera_used >= CHIMERA_MAX_KEYS:
+            return await interaction.response.send_message(
+                f"{user.mention} has no Chimera keys remaining.",
+                ephemeral=True
+            )
+        chimera_used += 1
+        remaining = CHIMERA_MAX_KEYS - chimera_used
+        set_key_row(user.id, user.display_name, hydra_used, chimera_used)
+        return await interaction.response.send_message(
+            f"Chimera key consumed! Only {remaining}/{CHIMERA_MAX_KEYS} keys remain, warrior.",
+            ephemeral=True
+        )
+
+
+@keys_group.command(
+    name="report",
+    description="Admin: View Hydra and Chimera key usage for all users."
+)
+async def keys_report_slash(interaction):
+    if not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message(
+            "You do not have permission.",
+            ephemeral=True
+        )
+
+    c.execute("SELECT username, hydra_used, chimera_used FROM keys")
+    rows = c.fetchall()
+
+    if not rows:
+        return await interaction.response.send_message(
+            "No key usage recorded yet.",
+            ephemeral=True
+        )
+
+    def status_emoji(used, max_keys):
+        if used >= max_keys:
+            return "🟢"
+        if used == 0:
+            return "🔴"
+        return "🟡"
+
+    lines = []
+    for username, hydra_used, chimera_used in rows:
+        hydra_status = status_emoji(hydra_used, HYDRA_MAX_KEYS)
+        chimera_status = status_emoji(chimera_used, CHIMERA_MAX_KEYS)
+        lines.append(
+            f"**{username}** | Hydra: {hydra_status} ({hydra_used}/{HYDRA_MAX_KEYS}) "
+            f"| Chimera: {chimera_status} ({chimera_used}/{CHIMERA_MAX_KEYS})"
+        )
+
+    embed = discord.Embed(
+        title="Key Usage Overview",
+        description="\n".join(lines),
+        color=discord.Color.dark_teal()
+    )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 mercy_group = app_commands.Group(
     name="mercy",
@@ -2335,5 +2528,6 @@ tree.add_command(mercy_group)
 tree.add_command(reminder_group)
 tree.add_command(gacha_group)
 tree.add_command(admin_group)
+tree.add_command(keys_group)
 
 bot.run(TOKEN)
