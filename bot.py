@@ -1308,28 +1308,24 @@ async def keys_add_slash(interaction, boss: app_commands.Choice[str]):
         if hydra_used >= HYDRA_MAX_KEYS:
             return await interaction.response.send_message(
                 f"{user.mention} has no Hydra keys remaining.",
-                ephemeral=True
             )
         hydra_used += 1
         remaining = HYDRA_MAX_KEYS - hydra_used
         set_key_row(user.id, user.display_name, hydra_used, chimera_used)
         return await interaction.response.send_message(
             f"Hydra key consumed! Only {remaining}/{HYDRA_MAX_KEYS} keys remain, warrior.",
-            ephemeral=True
         )
 
     if boss.value == "chimera":
         if chimera_used >= CHIMERA_MAX_KEYS:
             return await interaction.response.send_message(
                 f"{user.mention} has no Chimera keys remaining.",
-                ephemeral=True
             )
         chimera_used += 1
         remaining = CHIMERA_MAX_KEYS - chimera_used
         set_key_row(user.id, user.display_name, hydra_used, chimera_used)
         return await interaction.response.send_message(
             f"Chimera key consumed! Only {remaining}/{CHIMERA_MAX_KEYS} keys remain, warrior.",
-            ephemeral=True
         )
 
 
@@ -1350,7 +1346,6 @@ async def keys_report_slash(interaction):
     if not rows:
         return await interaction.response.send_message(
             "No key usage recorded yet.",
-            ephemeral=True
         )
 
     def status_emoji(used, max_keys):
@@ -1375,7 +1370,7 @@ async def keys_report_slash(interaction):
         color=discord.Color.dark_teal()
     )
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed)
 
 mercy_group = app_commands.Group(
     name="mercy",
