@@ -751,9 +751,17 @@ async def champion_info_slash(interaction: discord.Interaction, name: str):
     areas_str = ", ".join(areas) if areas else "General PvE"
     embed.add_field(name="🏰 Top Viable Areas", value=f"`{areas_str}`", inline=False)
 
-    mechanics = data.get('buffs_debuffs', [])
-    mech_str = ", ".join(mechanics) if mechanics else "None listed"
-    embed.add_field(name="⚡ Buffs & Debuffs Kit", value=f"```\n{mech_str}\n```", inline=False)
+    # ----------------------------------------------------
+    # NEW DYNAMIC SKILL EXTRACTOR
+    # ----------------------------------------------------
+    active_skills = data.get('active_skills', [])
+    for skill in active_skills:
+        # Discord has a 1024 character limit per field, so we slice it just in case!
+        embed.add_field(name=f"⚔️ {skill.get('title', 'Active Skill')}", value=skill.get('desc', 'No description')[:1021] + "...", inline=False)
+
+    passive_skills = data.get('passive_skills', [])
+    for skill in passive_skills:
+        embed.add_field(name=f"🛡️ {skill.get('title', 'Passive Skill')}", value=skill.get('desc', 'No description')[:1021] + "...", inline=False)
 
     moves = data.get('moves_multipliers', [])
     moves_str = "\n".join([f"🔹 {m}" for m in moves]) if moves else "No listed formula"
