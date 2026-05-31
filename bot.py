@@ -64,75 +64,76 @@ else:
 #  SECTION 2: DATABASE SETUP
 # ============================================================
 
-conn = sqlite3.connect("mercy.db")
-c = conn.cursor()
+# Check if Railway gave us a permanent hard drive path, otherwise use local
+DB_PATH = os.getenv("DB_PATH", "mercy.db")
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS mercy (
-    user_id TEXT,
-    shard_type TEXT,
-    epic_pity INTEGER DEFAULT 0,
-    legendary_pity INTEGER DEFAULT 0,
-    mythical_pity INTEGER DEFAULT 0,
-    PRIMARY KEY (user_id, shard_type)
-)
-""")
+# Thread safety applied to prevent simultaneous command crashes
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS guild_channels (
-    guild_id TEXT PRIMARY KEY,
-    warning_channel_id INTEGER,
-    suggestion_channel_id INTEGER,
-    feedback_channel_id INTEGER,
-    commands_channel_id INTEGER,
-    mercy_channel_id INTEGER,
-    warning_report_channel_id INTEGER
-)
-""")
+with conn:
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS mercy (
+        user_id TEXT,
+        shard_type TEXT,
+        epic_pity INTEGER DEFAULT 0,
+        legendary_pity INTEGER DEFAULT 0,
+        mythical_pity INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, shard_type)
+    )
+    """)
 
-# Apply schema updates gracefully if the DB already exists
-columns_to_add = [
-    ("mercy_channel_id", "INTEGER"),
-    ("warning_report_channel_id", "INTEGER")
-]
-for col_name, col_type in columns_to_add:
-    try:
-        c.execute(f"ALTER TABLE guild_channels ADD COLUMN {col_name} {col_type}")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS guild_channels (
+        guild_id TEXT PRIMARY KEY,
+        warning_channel_id INTEGER,
+        suggestion_channel_id INTEGER,
+        feedback_channel_id INTEGER,
+        commands_channel_id INTEGER,
+        mercy_channel_id INTEGER,
+        warning_report_channel_id INTEGER
+    )
+    """)
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS keys (
-    user_id TEXT PRIMARY KEY,
-    username TEXT,
-    hydra_used INTEGER DEFAULT 0,
-    chimera_used INTEGER DEFAULT 0
-)
-""")
+    # Apply schema updates gracefully if the DB already exists
+    columns_to_add = [
+        ("mercy_channel_id", "INTEGER"),
+        ("warning_report_channel_id", "INTEGER")
+    ]
+    for col_name, col_type in columns_to_add:
+        try:
+            conn.execute(f"ALTER TABLE guild_channels ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS hidden_warnings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id TEXT,
-    user_id TEXT,
-    mod_id TEXT,
-    reason TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-)
-""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS keys (
+        user_id TEXT PRIMARY KEY,
+        username TEXT,
+        hydra_used INTEGER DEFAULT 0,
+        chimera_used INTEGER DEFAULT 0
+    )
+    """)
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS reminders (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id TEXT,
-    channel_id TEXT,
-    reminder_text TEXT,
-    due_time INTEGER
-)
-""")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS hidden_warnings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT,
+        user_id TEXT,
+        mod_id TEXT,
+        reason TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    """)
 
-conn.commit()
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id TEXT,
+        channel_id TEXT,
+        reminder_text TEXT,
+        due_time INTEGER
+    )
+    """)
 
 # ============================================================
 #  SECTION 3: MERCY & DB HELPERS
@@ -174,28 +175,28 @@ def calc_mythical_chance(shard_type, pity):
 
 def get_mercy_row(user_id, shard_type):
     shard_type = shard_type.lower()
-    c.execute(
+    cursor = conn.execute(
         "SELECT epic_pity, legendary_pity, mythical_pity FROM mercy WHERE user_id=? AND shard_type=?",
         (str(user_id), shard_type)
     )
-    row = c.fetchone()
+    row = cursor.fetchone()
     if row is None:
-        c.execute("INSERT INTO mercy (user_id, shard_type) VALUES (?, ?)", (str(user_id), shard_type))
-        conn.commit()
+        with conn:
+            conn.execute("INSERT INTO mercy (user_id, shard_type) VALUES (?, ?)", (str(user_id), shard_type))
         return 0, 0, 0
     return row
 
 def set_mercy_row(user_id, shard_type, epic, legendary, mythical):
     shard_type = shard_type.lower()
-    c.execute("""
-        INSERT INTO mercy (user_id, shard_type, epic_pity, legendary_pity, mythical_pity)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, shard_type) DO UPDATE SET
-            epic_pity=excluded.epic_pity,
-            legendary_pity=excluded.legendary_pity,
-            mythical_pity=excluded.mythical_pity
-    """, (str(user_id), shard_type, epic, legendary, mythical))
-    conn.commit()
+    with conn:
+        conn.execute("""
+            INSERT INTO mercy (user_id, shard_type, epic_pity, legendary_pity, mythical_pity)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, shard_type) DO UPDATE SET
+                epic_pity=excluded.epic_pity,
+                legendary_pity=excluded.legendary_pity,
+                mythical_pity=excluded.mythical_pity
+        """, (str(user_id), shard_type, epic, legendary, mythical))
 
 def process_mercy_pulls(user_id, shard_type, amount, epic_on=0, legendary_on=0, mythical_on=0):
     epic_pity, leg_pity, myth_pity = get_mercy_row(user_id, shard_type)
@@ -225,12 +226,12 @@ def process_mercy_pulls(user_id, shard_type, amount, epic_on=0, legendary_on=0, 
     return epic_pity, leg_pity, myth_pity
 
 def get_guild_channels(guild_id):
-    c.execute("""
+    cursor = conn.execute("""
         SELECT warning_channel_id, suggestion_channel_id, feedback_channel_id,
                commands_channel_id, mercy_channel_id, warning_report_channel_id
         FROM guild_channels WHERE guild_id=?
     """, (str(guild_id),))
-    row = c.fetchone()
+    row = cursor.fetchone()
     if row is None:
         return {
             "warning_channel_id": None, "suggestion_channel_id": None,
@@ -244,19 +245,19 @@ def get_guild_channels(guild_id):
     }
 
 def ensure_guild_row(guild_id):
-    c.execute("SELECT guild_id FROM guild_channels WHERE guild_id=?", (str(guild_id),))
-    if c.fetchone() is None:
-        c.execute("INSERT INTO guild_channels (guild_id) VALUES (?)", (str(guild_id),))
-        conn.commit()
+    cursor = conn.execute("SELECT guild_id FROM guild_channels WHERE guild_id=?", (str(guild_id),))
+    if cursor.fetchone() is None:
+        with conn:
+            conn.execute("INSERT INTO guild_channels (guild_id) VALUES (?)", (str(guild_id),))
 
 def set_guild_channel(guild_id, field, channel_id):
     ensure_guild_row(guild_id)
-    c.execute(f"UPDATE guild_channels SET {field}=? WHERE guild_id=?", (channel_id, str(guild_id)))
-    conn.commit()
+    with conn:
+        conn.execute(f"UPDATE guild_channels SET {field}=? WHERE guild_id=?", (channel_id, str(guild_id)))
 
 def get_default_feedback_channel_id():
-    c.execute("SELECT feedback_channel_id FROM guild_channels WHERE feedback_channel_id IS NOT NULL LIMIT 1")
-    row = c.fetchone()
+    cursor = conn.execute("SELECT feedback_channel_id FROM guild_channels WHERE feedback_channel_id IS NOT NULL LIMIT 1")
+    row = cursor.fetchone()
     if row and row[0]:
         return int(row[0])
     return SUGGESTION_CHANNEL_ID
@@ -279,24 +280,24 @@ def get_shard_emoji(shard_type):
 # ============================================================
 
 def get_key_row(user_id, username):
-    c.execute("SELECT hydra_used, chimera_used FROM keys WHERE user_id=?", (str(user_id),))
-    row = c.fetchone()
+    cursor = conn.execute("SELECT hydra_used, chimera_used FROM keys WHERE user_id=?", (str(user_id),))
+    row = cursor.fetchone()
     if row is None:
-        c.execute("INSERT INTO keys (user_id, username, hydra_used, chimera_used) VALUES (?, ?, 0, 0)", (str(user_id), username))
-        conn.commit()
+        with conn:
+            conn.execute("INSERT INTO keys (user_id, username, hydra_used, chimera_used) VALUES (?, ?, 0, 0)", (str(user_id), username))
         return 0, 0
     return row
 
 def set_key_row(user_id, username, hydra_used, chimera_used):
-    c.execute("""
-        INSERT INTO keys (user_id, username, hydra_used, chimera_used)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username=excluded.username,
-            hydra_used=excluded.hydra_used,
-            chimera_used=excluded.chimera_used
-    """, (str(user_id), username, hydra_used, chimera_used))
-    conn.commit()
+    with conn:
+        conn.execute("""
+            INSERT INTO keys (user_id, username, hydra_used, chimera_used)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                hydra_used=excluded.hydra_used,
+                chimera_used=excluded.chimera_used
+        """, (str(user_id), username, hydra_used, chimera_used))
 
 # ============================================================
 #  SECTION 3.5: SCHEDULER TASKS
@@ -323,8 +324,8 @@ async def send_monthly_warning_report():
         target = guild.get_channel(report_ch_id)
         if not target: continue
 
-        c.execute("SELECT user_id, mod_id, reason, timestamp FROM hidden_warnings WHERE guild_id=?", (str(guild.id),))
-        rows = c.fetchall()
+        cursor = conn.execute("SELECT user_id, mod_id, reason, timestamp FROM hidden_warnings WHERE guild_id=?", (str(guild.id),))
+        rows = cursor.fetchall()
         
         if not rows:
             await target.send("📊 **Monthly Hidden Warning Report:** No warnings recorded this month.")
@@ -334,37 +335,37 @@ async def send_monthly_warning_report():
         embed = discord.Embed(title="📊 Monthly Hidden Warnings Report", description="\n".join(lines), color=discord.Color.red())
         await target.send(embed=embed)
         
-        c.execute("DELETE FROM hidden_warnings WHERE guild_id=?", (str(guild.id),))
-        conn.commit()
+        with conn:
+            conn.execute("DELETE FROM hidden_warnings WHERE guild_id=?", (str(guild.id),))
 
 async def send_hydra_key_report_and_reset():
     channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
     if not channel: return
-    c.execute("SELECT username, hydra_used FROM keys")
-    rows = c.fetchall()
+    cursor = conn.execute("SELECT username, hydra_used FROM keys")
+    rows = cursor.fetchall()
     if not rows:
         await channel.send("Hydra key report: no data recorded this week.")
     else:
         await channel.send("**Weekly Hydra Key Usage Report**\n" + "\n".join([f"{u}: {used}/{HYDRA_MAX_KEYS} used" for u, used in rows]))
-    c.execute("UPDATE keys SET hydra_used = 0")
-    conn.commit()
+    with conn:
+        conn.execute("UPDATE keys SET hydra_used = 0")
 
 async def send_chimera_key_report_and_reset():
     channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
     if not channel: return
-    c.execute("SELECT username, chimera_used FROM keys")
-    rows = c.fetchall()
+    cursor = conn.execute("SELECT username, chimera_used FROM keys")
+    rows = cursor.fetchall()
     if not rows:
         await channel.send("Chimera key report: no data recorded this week.")
     else:
         await channel.send("**Weekly Chimera Key Usage Report**\n" + "\n".join([f"{u}: {used}/{CHIMERA_MAX_KEYS} used" for u, used in rows]))
-    c.execute("UPDATE keys SET chimera_used = 0")
-    conn.commit()
+    with conn:
+        conn.execute("UPDATE keys SET chimera_used = 0")
 
 async def check_persistent_reminders():
     now = int(time.time())
-    c.execute("SELECT id, user_id, channel_id, reminder_text FROM reminders WHERE due_time <= ?", (now,))
-    rows = c.fetchall()
+    cursor = conn.execute("SELECT id, user_id, channel_id, reminder_text FROM reminders WHERE due_time <= ?", (now,))
+    rows = cursor.fetchall()
     for r_id, user_id, channel_id, text in rows:
         channel = bot.get_channel(int(channel_id))
         if channel:
@@ -372,8 +373,8 @@ async def check_persistent_reminders():
                 await channel.send(f"<@{user_id}> 🔔 Reminder: **{text}**")
             except discord.Forbidden:
                 pass
-        c.execute("DELETE FROM reminders WHERE id=?", (r_id,))
-    conn.commit()
+        with conn:
+            conn.execute("DELETE FROM reminders WHERE id=?", (r_id,))
 
 # ============================================================
 #  SECTION 4: EVENTS
@@ -382,15 +383,19 @@ async def check_persistent_reminders():
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
-    try: scheduler.start()
-    except Exception: pass
+    
+    # Prevents duplicate crons if the bot reconnects to the gateway
+    if not hasattr(bot, 'scheduler_started'):
+        bot.scheduler_started = True
+        try: scheduler.start()
+        except Exception: pass
 
-    scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=11, minute=0)
-    scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
-    scheduler.add_job(send_monthly_warning_report, "cron", day=1, hour=12, minute=0)
-    scheduler.add_job(send_hydra_key_report_and_reset, "cron", day_of_week="wed", hour=10, minute=59)
-    scheduler.add_job(send_chimera_key_report_and_reset, "cron", day_of_week="thu", hour=11, minute=0)
-    scheduler.add_job(check_persistent_reminders, "interval", seconds=60)
+        scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=11, minute=0)
+        scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
+        scheduler.add_job(send_monthly_warning_report, "cron", day=1, hour=12, minute=0)
+        scheduler.add_job(send_hydra_key_report_and_reset, "cron", day_of_week="wed", hour=10, minute=59)
+        scheduler.add_job(send_chimera_key_report_and_reset, "cron", day_of_week="thu", hour=11, minute=0)
+        scheduler.add_job(check_persistent_reminders, "interval", seconds=60)
 
     try: await bot.tree.sync()
     except Exception as e: print("Slash sync failed:", e)
@@ -529,14 +534,12 @@ class ReportChannelView(SetupBaseView):
         channel = interaction.guild.get_channel(select.values[0].id)
         set_guild_channel(self.guild.id, "warning_report_channel_id", channel.id)
         self.state["warning_report_channel"] = channel
-        await interaction.response.edit_message(content=f"Monthly Reports channel set to {channel.mention}.", view=None)
         await finish_setup_summary(interaction, self.state)
 
     @discord.ui.button(label="Skip this step", style=discord.ButtonStyle.secondary)
     async def skip_step(self, interaction: discord.Interaction, button):
         set_guild_channel(self.guild.id, "warning_report_channel_id", None)
         self.state["warning_report_channel"] = None
-        await interaction.response.edit_message(content="Reports channel skipped.", view=None)
         await finish_setup_summary(interaction, self.state)
 
 async def start_commands_step(interaction, state):
@@ -558,7 +561,6 @@ async def start_report_step(interaction, state):
     await interaction.followup.send("Step 6/6 — Select the **Hidden Warning Report** channel (optional):", view=ReportChannelView(interaction.user.id, interaction.guild, state))
 
 async def finish_setup_summary(interaction, state):
-    await interaction.message.delete()
     guild = interaction.guild
     channels = get_guild_channels(guild.id)
 
@@ -572,7 +574,8 @@ async def finish_setup_summary(interaction, state):
     embed.add_field(name="Warning Channel", value=fmt(guild.get_channel(channels["warning_channel_id"])), inline=False)
     embed.add_field(name="Report Channel", value=fmt(guild.get_channel(channels["warning_report_channel_id"])), inline=False)
 
-    await interaction.channel.send(embed=embed)
+    # Edit the existing message smoothly to prevent interaction failed crashes
+    await interaction.response.edit_message(content="Wizard completed!", embed=embed, view=None)
 
 # ============================================================
 #  SECTION 6: on_message (ANONYMOUS SUGGESTIONS)
@@ -690,7 +693,6 @@ async def shard_autocomplete(interaction, current):
 # CHAMPION INFO SLASH COMMAND (CONDENSES TO MATCH ON-THE-FLY)
 # ------------------------------------------------------------
 async def champion_autocomplete(interaction: discord.Interaction, current: str):
-    # Condenses choices based on matches anywhere within the name as you type
     matches = [
         app_commands.Choice(name=name, value=name)
         for name in champions_data.keys()
@@ -716,22 +718,49 @@ async def champion_info_slash(interaction: discord.Interaction, name: str):
 
     data = champions_data[champ_key]
 
+    # Dynamically set the embed color based on Champion Rarity
+    rarity = data.get('rarity', 'Unknown').lower()
+    if rarity == "mythical":
+        color = discord.Color.red()
+    elif rarity == "legendary":
+        color = discord.Color.gold()
+    elif rarity == "epic":
+        color = discord.Color.purple()
+    elif rarity == "rare":
+        color = discord.Color.blue()
+    elif rarity == "uncommon":
+        color = discord.Color.green()
+    elif rarity == "common":
+        color = discord.Color.light_grey()
+    else:
+        color = discord.Color.dark_theme()
+
     embed = discord.Embed(
         title=f"🔥 {data.get('name', champ_key)}",
         url=data.get('url', ''),
-        color=discord.Color.purple()
+        color=color
     )
 
+    embed.add_field(name="⚔️ Rarity", value=f"`{data.get('rarity', 'Unknown')}`", inline=True)
+    embed.add_field(name="🔮 Affinity", value=f"`{data.get('affinity', 'Unknown')}`", inline=True)
     embed.add_field(name="⚔️ Faction", value=f"`{data.get('faction', 'Unknown')}`", inline=True)
     embed.add_field(name="🛡️ Role", value=f"`{data.get('role', 'Unknown')}`", inline=True)
+    embed.add_field(name="⭐ Star Rating", value=f"`{data.get('rating', 'Unrated')}`", inline=True)
 
-    sets = data.get('best_sets', [])
-    sets_str = "\n".join([f"🔸 **{s}**" for s in sets]) if sets else "Not specified"
-    embed.add_field(name="🏆 Recommended Gear Sets", value=sets_str, inline=False)
+    areas = data.get('top_areas', [])
+    areas_str = ", ".join(areas) if areas else "General PvE"
+    embed.add_field(name="🏰 Top Viable Areas", value=f"`{areas_str}`", inline=False)
 
-    embed.add_field(name="📊 Stat Priority Focus", value=f"```\n{data.get('stat_priority', 'Unknown')}\n```", inline=False)
+    mechanics = data.get('buffs_debuffs', [])
+    mech_str = ", ".join(mechanics) if mechanics else "None listed"
+    embed.add_field(name="⚡ Buffs & Debuffs Kit", value=f"```\n{mech_str}\n```", inline=False)
 
-    embed.set_footer(text="Hydra Companion • Strategy Insights", icon_url=bot.user.avatar.url if bot.user.avatar else None)
+    moves = data.get('moves_multipliers', [])
+    moves_str = "\n".join([f"🔹 {m}" for m in moves]) if moves else "No listed formula"
+    embed.add_field(name="📊 Skill Damage Multipliers", value=moves_str, inline=False)
+
+    avatar_url = bot.user.display_avatar.url if bot.user.display_avatar else None
+    embed.set_footer(text="Hydra Companion • Strategy Insights", icon_url=avatar_url)
 
     await interaction.response.send_message(embed=embed)
 
@@ -781,14 +810,14 @@ class KeyUsageModal(discord.ui.Modal, title='Log Key Usage'):
 
 @keys_group.command(name="add", description="Record a used Hydra or Chimera key via Pop-Up.")
 @app_commands.choices(boss=[app_commands.Choice(name="Hydra", value="hydra"), app_commands.Choice(name="Chimera", value="chimera")])
-async def keys_add_slash(interaction: discord.Interaction, boss: app_commands.Choice[str]):
-    await interaction.response.send_modal(KeyUsageModal(boss.value))
+async def keys_add_slash(interaction: discord.Interaction, boss: str):
+    await interaction.response.send_modal(KeyUsageModal(boss))
 
 @keys_group.command(name="report", description="View Hydra and Chimera key usage for all users.")
 @app_commands.default_permissions(administrator=True)
 async def keys_report_slash(interaction):
-    c.execute("SELECT username, hydra_used, chimera_used FROM keys")
-    rows = c.fetchall()
+    cursor = conn.execute("SELECT username, hydra_used, chimera_used FROM keys")
+    rows = cursor.fetchall()
     if not rows: return await interaction.response.send_message("No key usage recorded yet.")
 
     def status_emoji(used, max_keys):
@@ -813,7 +842,7 @@ async def announce_slash(interaction, message: str):
     channel = interaction.client.get_channel(ANNOUNCE_CHANNEL_ID)
     if not channel: return await interaction.response.send_message("Announcement channel missing.", ephemeral=True)
     embed = discord.Embed(title="📢 Announcement", description=message, color=discord.Color.blue())
-    embed.set_footer(text=f"Posted by {interaction.user}", icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+    embed.set_footer(text=f"Posted by {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
     embed.timestamp = discord.utils.utcnow()
     await channel.send(embed=embed)
     await interaction.response.send_message("Announcement sent.", ephemeral=True)
@@ -843,9 +872,9 @@ async def ban_slash(interaction: discord.Interaction, member: discord.Member, re
 @tree.command(name="warn", description="Silently log a warning for a user. Appears in monthly report.")
 @app_commands.default_permissions(administrator=True)
 async def warn_slash(interaction: discord.Interaction, member: discord.Member, reason: str):
-    c.execute("INSERT INTO hidden_warnings (guild_id, user_id, mod_id, reason) VALUES (?, ?, ?, ?)",
-              (str(interaction.guild.id), str(member.id), str(interaction.user.id), reason))
-    conn.commit()
+    with conn:
+        conn.execute("INSERT INTO hidden_warnings (guild_id, user_id, mod_id, reason) VALUES (?, ?, ?, ?)",
+                     (str(interaction.guild.id), str(member.id), str(interaction.user.id), reason))
     await interaction.response.send_message(f"✅ Secretly warned {member.display_name} for: {reason}", ephemeral=True)
 
 @tree.command(name="reboot", description="Reboots the bot cleanly without resetting configurations.")
@@ -1042,17 +1071,17 @@ async def reminder_set_slash(interaction, duration: str, reminder: str):
     seconds = int(amount) * {"m": 60, "h": 3600, "d": 86400}[unit]
     due_time = int(time.time()) + seconds
     
-    c.execute("INSERT INTO reminders (user_id, channel_id, reminder_text, due_time) VALUES (?, ?, ?, ?)",
-              (str(interaction.user.id), str(interaction.channel.id), reminder, due_time))
-    conn.commit()
-    reminder_id = c.lastrowid
+    with conn:
+        cursor = conn.execute("INSERT INTO reminders (user_id, channel_id, reminder_text, due_time) VALUES (?, ?, ?, ?)",
+                              (str(interaction.user.id), str(interaction.channel.id), reminder, due_time))
+        reminder_id = cursor.lastrowid
     
     await interaction.response.send_message(f"✅ Reminder **#{reminder_id}** set!\nI will remind you <t:{due_time}:R> about: *{reminder}*", ephemeral=True)
 
 @reminder_group.command(name="list", description="View all your active reminders.")
 async def reminder_list_slash(interaction):
-    c.execute("SELECT id, reminder_text, due_time FROM reminders WHERE user_id=?", (str(interaction.user.id),))
-    rows = c.fetchall()
+    cursor = conn.execute("SELECT id, reminder_text, due_time FROM reminders WHERE user_id=?", (str(interaction.user.id),))
+    rows = cursor.fetchall()
     
     if not rows: return await interaction.response.send_message("You have no active reminders.", ephemeral=True)
     
@@ -1061,12 +1090,12 @@ async def reminder_list_slash(interaction):
 
 @reminder_group.command(name="cancel", description="Cancel one of your active reminders.")
 async def reminder_cancel_slash(interaction, reminder_id: int):
-    c.execute("SELECT id FROM reminders WHERE id=? AND user_id=?", (reminder_id, str(interaction.user.id)))
-    if not c.fetchone():
+    cursor = conn.execute("SELECT id FROM reminders WHERE id=? AND user_id=?", (reminder_id, str(interaction.user.id)))
+    if not cursor.fetchone():
         return await interaction.response.send_message(f"No reminder found with ID #{reminder_id}.", ephemeral=True)
         
-    c.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
-    conn.commit()
+    with conn:
+        conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
     await interaction.response.send_message(f"❎ Reminder #{reminder_id} cancelled.", ephemeral=True)
 
 # ============================================================
