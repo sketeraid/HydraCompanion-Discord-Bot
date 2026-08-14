@@ -1,7 +1,3 @@
-# ============================================================
-#  SECTION 1: IMPORTS, GLOBALS, CONSTANTS, DB, HELPERS
-# ============================================================
-
 import os
 import sys
 import time
@@ -22,8 +18,11 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="$", intents=intents)
 tree = bot.tree
+
+# Need Europe/London time so the daily crons fire correctly for the clan
 scheduler = AsyncIOScheduler(timezone="Europe/London")
 
+# TODO: Move these hardcoded IDs to a config.json or database table eventually
 HYDRA_WARNING_CHANNEL_ID = 1461342242470887546
 ANNOUNCE_CHANNEL_ID = 1461342242470887546
 SUGGESTION_CHANNEL_ID = 1464216800651640893
@@ -39,6 +38,7 @@ ALLOWED_SUGGEST_BUTTON_CHANNELS = {
 
 SHARD_CHOICES = ["ancient", "void", "primal", "sacred"]
 
+# Official Plarium drop rates
 BASE_RATES = {
     "ancient": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
     "void": {"epic": 8.0, "legendary": 0.5, "mythical": 0.0},
@@ -46,10 +46,8 @@ BASE_RATES = {
     "sacred": {"epic": 94.0, "legendary": 6.0, "mythical": 0.0}
 }
 
-# ============================================================
-#  LOAD CHAMPION STRATEGY DATA
-# ============================================================
 
+# --- Load Champion Data ---
 CHAMPIONS_DATA_FILE = "champions_data.json"
 champions_data = {}
 
@@ -60,17 +58,15 @@ if os.path.exists(CHAMPIONS_DATA_FILE):
 else:
     print(f"⚠️ Warning: {CHAMPIONS_DATA_FILE} not found. /champion command will be empty.")
 
-# ============================================================
-#  SECTION 2: DATABASE SETUP
-# ============================================================
 
-# Check if Railway gave us a permanent hard drive path, otherwise use local
-DB_PATH = os.getenv("DB_PATH", "mercy.db")
+# --- Database Setup ---
 
-# Thread safety applied to prevent simultaneous command crashes
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+# check_same_thread=False is required here because discord.py handles things asynchronously,
+# and SQLite throws a fit if different threads access the same connection.
+conn = sqlite3.connect("mercy.db", check_same_thread=False)
 
 with conn:
+    # Main mercy tracker table
     conn.execute("""
     CREATE TABLE IF NOT EXISTS mercy (
         user_id TEXT,
@@ -94,7 +90,7 @@ with conn:
     )
     """)
 
-    # Apply schema updates gracefully if the DB already exists
+    # Lazy migration: try to add these columns in case it's an older version of the db
     columns_to_add = [
         ("mercy_channel_id", "INTEGER"),
         ("warning_report_channel_id", "INTEGER")
@@ -103,7 +99,7 @@ with conn:
         try:
             conn.execute(f"ALTER TABLE guild_channels ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError:
-            pass
+            pass # Column already exists
 
     conn.execute("""
     CREATE TABLE IF NOT EXISTS keys (
@@ -135,9 +131,8 @@ with conn:
     )
     """)
 
-# ============================================================
-#  SECTION 3: MERCY & DB HELPERS
-# ============================================================
+
+# --- Mercy & Drop Chance Helpers ---
 
 def calc_epic_chance(shard_type, pity):
     if shard_type in ("ancient", "void"):
@@ -153,16 +148,19 @@ def calc_legendary_chance(shard_type, pity):
         if pity <= 200:
             return base
         return min(100.0, base + (pity - 200) * 5.0)
+    
     if shard_type == "primal":
         base = BASE_RATES["primal"]["legendary"]
         if pity <= 75:
             return base
         return min(100.0, base + (pity - 75) * 1.0)
+        
     if shard_type == "sacred":
         base = BASE_RATES["sacred"]["legendary"]
         if pity <= 12:
             return base
         return min(100.0, base + (pity - 12) * 2.0)
+        
     return BASE_RATES[shard_type]["legendary"]
 
 def calc_mythical_chance(shard_type, pity):
@@ -174,12 +172,14 @@ def calc_mythical_chance(shard_type, pity):
     return BASE_RATES[shard_type]["mythical"]
 
 def get_mercy_row(user_id, shard_type):
+    """Fetches the mercy pity counts for a user, creates a row if it doesn't exist."""
     shard_type = shard_type.lower()
     cursor = conn.execute(
         "SELECT epic_pity, legendary_pity, mythical_pity FROM mercy WHERE user_id=? AND shard_type=?",
         (str(user_id), shard_type)
     )
     row = cursor.fetchone()
+    
     if row is None:
         with conn:
             conn.execute("INSERT INTO mercy (user_id, shard_type) VALUES (?, ?)", (str(user_id), shard_type))
@@ -232,12 +232,14 @@ def get_guild_channels(guild_id):
         FROM guild_channels WHERE guild_id=?
     """, (str(guild_id),))
     row = cursor.fetchone()
+    
     if row is None:
         return {
             "warning_channel_id": None, "suggestion_channel_id": None,
             "feedback_channel_id": None, "commands_channel_id": None,
             "mercy_channel_id": None, "warning_report_channel_id": None
         }
+        
     return {
         "warning_channel_id": row[0], "suggestion_channel_id": row[1],
         "feedback_channel_id": row[2], "commands_channel_id": row[3],
@@ -275,9 +277,8 @@ def compute_readiness_color_and_flag(shard_type, legendary_chance, mythical_chan
 def get_shard_emoji(shard_type):
     return {"ancient": "🔵", "void": "🟣", "primal": "🔴", "sacred": "🟡"}.get(shard_type, "🔮")
 
-# ============================================================
-#  KEY TRACKING HELPERS
-# ============================================================
+
+# --- Key Tracking Helpers ---
 
 def get_key_row(user_id, username):
     cursor = conn.execute("SELECT hydra_used, chimera_used FROM keys WHERE user_id=?", (str(user_id),))
@@ -299,28 +300,33 @@ def set_key_row(user_id, username, hydra_used, chimera_used):
                 chimera_used=excluded.chimera_used
         """, (str(user_id), username, hydra_used, chimera_used))
 
-# ============================================================
-#  SECTION 3.5: SCHEDULER TASKS
-# ============================================================
+
+# --- Scheduler Tasks ---
 
 async def send_weekly_warning():
+    # print("DEBUG: Sending weekly hydra warning...")
     for guild in bot.guilds:
         channel_id = get_guild_channels(guild.id).get("warning_channel_id")
         if not channel_id: continue
+        
         target = guild.get_channel(channel_id)
-        if target: await target.send("@everyone 24 HOUR WARNING FOR HYDRA CLASH, Don't forget or you'll miss out on rewards!")
+        if target: 
+            await target.send("@everyone 24 HOUR WARNING FOR HYDRA CLASH, Don't forget or you'll miss out on rewards!")
 
 async def send_chimera_warning():
     for guild in bot.guilds:
         channel_id = get_guild_channels(guild.id).get("warning_channel_id")
         if not channel_id: continue
+        
         target = guild.get_channel(channel_id)
-        if target: await target.send("@everyone 24 HOUR WARNING FOR CHIMERA CLASH, Don't forget or you'll miss out on rewards!")
+        if target: 
+            await target.send("@everyone 24 HOUR WARNING FOR CHIMERA CLASH, Don't forget or you'll miss out on rewards!")
 
 async def send_monthly_warning_report():
     for guild in bot.guilds:
         report_ch_id = get_guild_channels(guild.id).get("warning_report_channel_id")
         if not report_ch_id: continue
+        
         target = guild.get_channel(report_ch_id)
         if not target: continue
 
@@ -341,24 +347,31 @@ async def send_monthly_warning_report():
 async def send_hydra_key_report_and_reset():
     channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
     if not channel: return
+    
     cursor = conn.execute("SELECT username, hydra_used FROM keys")
     rows = cursor.fetchall()
+    
     if not rows:
         await channel.send("Hydra key report: no data recorded this week.")
     else:
         await channel.send("**Weekly Hydra Key Usage Report**\n" + "\n".join([f"{u}: {used}/{HYDRA_MAX_KEYS} used" for u, used in rows]))
+        
+    # reset keys for the new week
     with conn:
         conn.execute("UPDATE keys SET hydra_used = 0")
 
 async def send_chimera_key_report_and_reset():
     channel = bot.get_channel(KEY_REPORT_CHANNEL_ID)
     if not channel: return
+    
     cursor = conn.execute("SELECT username, chimera_used FROM keys")
     rows = cursor.fetchall()
+    
     if not rows:
         await channel.send("Chimera key report: no data recorded this week.")
     else:
         await channel.send("**Weekly Chimera Key Usage Report**\n" + "\n".join([f"{u}: {used}/{CHIMERA_MAX_KEYS} used" for u, used in rows]))
+        
     with conn:
         conn.execute("UPDATE keys SET chimera_used = 0")
 
@@ -366,29 +379,33 @@ async def check_persistent_reminders():
     now = int(time.time())
     cursor = conn.execute("SELECT id, user_id, channel_id, reminder_text FROM reminders WHERE due_time <= ?", (now,))
     rows = cursor.fetchall()
+    
     for r_id, user_id, channel_id, text in rows:
         channel = bot.get_channel(int(channel_id))
         if channel:
             try:
                 await channel.send(f"<@{user_id}> 🔔 Reminder: **{text}**")
             except discord.Forbidden:
-                pass
+                pass # skip if we don't have permissions to send
+                
+        # clear it out once sent
         with conn:
             conn.execute("DELETE FROM reminders WHERE id=?", (r_id,))
 
-# ============================================================
-#  SECTION 4: EVENTS
-# ============================================================
+
+# --- Bot Events ---
 
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
     
-    # Prevents duplicate crons if the bot reconnects to the gateway
+    # Prevents duplicate cron jobs if the bot disconnects and reconnects to the Discord gateway
     if not hasattr(bot, 'scheduler_started'):
         bot.scheduler_started = True
-        try: scheduler.start()
-        except Exception: pass
+        try: 
+            scheduler.start()
+        except Exception as e: 
+            print(f"Failed to start scheduler: {e}")
 
         scheduler.add_job(send_weekly_warning, "cron", day_of_week="tue", hour=11, minute=0)
         scheduler.add_job(send_chimera_warning, "cron", day_of_week="wed", hour=11, minute=0)
@@ -397,19 +414,23 @@ async def on_ready():
         scheduler.add_job(send_chimera_key_report_and_reset, "cron", day_of_week="thu", hour=11, minute=0)
         scheduler.add_job(check_persistent_reminders, "interval", seconds=60)
 
-    try: await bot.tree.sync()
-    except Exception as e: print("Slash sync failed:", e)
+    # Sync slash commands
+    try: 
+        await bot.tree.sync()
+        print("Slash commands synced!")
+    except Exception as e: 
+        print("Slash sync failed:", e)
 
 @bot.event
 async def on_guild_join(guild):
+    # drop a welcome message in the first channel we can talk in
     for ch in guild.text_channels:
         if ch.permissions_for(guild.me).send_messages:
             await ch.send("Hello! I am **Hydra Companion**.\nSupport server: https://discord.gg/DuemMm57jr")
             break
 
-# ============================================================
-#  SECTION 5: VIEWS
-# ============================================================
+
+# --- Views & Modals ---
 
 class SuggestionConfirmView(discord.ui.View):
     def __init__(self, user_id, suggestion):
@@ -419,9 +440,13 @@ class SuggestionConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Submit Anonymously", style=discord.ButtonStyle.green)
     async def submit_button(self, interaction, button):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("Not your confirmation.", ephemeral=True)
+        if interaction.user.id != self.user_id: 
+            return await interaction.response.send_message("Not your confirmation.", ephemeral=True)
+            
         channel = interaction.client.get_channel(get_default_feedback_channel_id())
-        if not channel: return await interaction.response.edit_message(content="Feedback channel misconfigured.", view=None)
+        if not channel: 
+            return await interaction.response.edit_message(content="Feedback channel misconfigured.", view=None)
+            
         embed = discord.Embed(title="💡 New Anonymous Suggestion", description=self.suggestion, color=discord.Color.green())
         embed.set_footer(text="Anonymous submission")
         await channel.send(embed=embed)
@@ -429,7 +454,8 @@ class SuggestionConfirmView(discord.ui.View):
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.red)
     async def cancel_button(self, interaction, button):
-        if interaction.user.id != self.user_id: return await interaction.response.send_message("Not your confirmation.", ephemeral=True)
+        if interaction.user.id != self.user_id: 
+            return await interaction.response.send_message("Not your confirmation.", ephemeral=True)
         await interaction.response.edit_message(content="Cancelled.", view=None)
 
 class MessageMeButton(discord.ui.View):
@@ -444,6 +470,9 @@ class MessageMeButton(discord.ui.View):
         except discord.Forbidden:
             await interaction.response.send_message("Enable DMs first.", ephemeral=True)
 
+
+# --- Setup Wizard Views ---
+
 class SetupBaseView(discord.ui.View):
     def __init__(self, owner_id, guild, state):
         super().__init__(timeout=300)
@@ -456,10 +485,6 @@ class SetupBaseView(discord.ui.View):
             await interaction.response.send_message("Not your setup wizard.", ephemeral=True)
             return False
         return True
-
-# ------------------------------------------------------------
-#  SETUP WIZARD VIEWS
-# ------------------------------------------------------------
 
 class CommandsChannelView(SetupBaseView):
     @discord.ui.select(cls=discord.ui.ChannelSelect, channel_types=[discord.ChannelType.text], placeholder="Select the Commands Guide channel...")
@@ -487,6 +512,7 @@ class SuggestionChannelView(SetupBaseView):
         channel = interaction.guild.get_channel(select.values[0].id)
         set_guild_channel(self.guild.id, "suggestion_channel_id", channel.id)
         self.state["suggestion_channel"] = channel
+        
         await interaction.response.edit_message(content=f"Suggestion channel set to {channel.mention}.", view=None)
         embed = discord.Embed(
             title="💡 Anonymous Suggestions",
@@ -542,6 +568,9 @@ class ReportChannelView(SetupBaseView):
         self.state["warning_report_channel"] = None
         await finish_setup_summary(interaction, self.state)
 
+
+# --- Setup Wizard Step Flows ---
+
 async def start_commands_step(interaction, state):
     await interaction.response.send_message("Step 1/6 — Select the **Commands Guide** channel (required):", view=CommandsChannelView(interaction.user.id, interaction.guild, state))
 
@@ -577,14 +606,14 @@ async def finish_setup_summary(interaction, state):
     # Edit the existing message smoothly to prevent interaction failed crashes
     await interaction.response.edit_message(content="Wizard completed!", embed=embed, view=None)
 
-# ============================================================
-#  SECTION 6: on_message (ANONYMOUS SUGGESTIONS)
-# ============================================================
+
+# --- Message Events (Suggestions) ---
 
 @bot.event
 async def on_message(message):
     if message.author.bot: return
 
+    # If it's a DM, treat it as an anonymous suggestion flow
     if isinstance(message.channel, discord.DMChannel):
         embed = discord.Embed(
             title="Confirm Anonymous Suggestion",
@@ -596,9 +625,8 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ============================================================
-#  SECTION 7: PREFIX COMMANDS
-# ============================================================
+
+# --- Prefix Commands ---
 
 @bot.command()
 async def test(ctx):
@@ -661,37 +689,38 @@ async def purge_prefix(ctx, amount: int):
     confirm = await ctx.send(f"✅ Deleted {len(deleted)} messages.")
     await confirm.delete(delay=5)
 
-# -----------------------------
-# PREFIX MERCY ADD 
-# -----------------------------
 @bot.command(name="mercyadd")
 async def mercyadd_cmd(ctx, shard_type: str, amount: int, epic_on: int = 0, legendary_on: int = 0, mythical_on: int = 0):
     shard_type = shard_type.lower()
-    if shard_type not in BASE_RATES: return await ctx.send("Invalid shard type.")
-    if amount <= 0: return await ctx.send("Amount must be positive.")
+    if shard_type not in BASE_RATES: 
+        return await ctx.send("Invalid shard type.")
+    if amount <= 0: 
+        return await ctx.send("Amount must be positive.")
 
     e, l, m = process_mercy_pulls(ctx.author.id, shard_type, amount, epic_on, legendary_on, mythical_on)
     
     emoji = get_shard_emoji(shard_type)
     msg = f"{ctx.author.mention}, recorded **{amount}** pulls to your {emoji} **{shard_type.capitalize()}** mercy.\n"
+    
     if epic_on > 0 or legendary_on > 0 or mythical_on > 0:
         msg += "*(Pity resets applied perfectly based on exactly when you pulled your rarities)*\n"
     
-    if shard_type in ("ancient", "void"): msg += f"**Epic:** {e}  |  "
+    if shard_type in ("ancient", "void"): 
+        msg += f"**Epic:** {e}  |  "
+        
     msg += f"**Legendary:** {l}"
-    if shard_type == "primal": msg += f"  |  **Mythical:** {m}"
+    
+    if shard_type == "primal": 
+        msg += f"  |  **Mythical:** {m}"
+        
     await ctx.send(msg)
 
-# ============================================================
-#  SECTION 8: SLASH COMMANDS 
-# ============================================================
+
+# --- Slash Commands ---
 
 async def shard_autocomplete(interaction, current):
     return [app_commands.Choice(name=s.capitalize(), value=s) for s in SHARD_CHOICES if current.lower() in s]
 
-# ------------------------------------------------------------
-# CHAMPION INFO SLASH COMMAND (CONDENSES TO MATCH ON-THE-FLY)
-# ------------------------------------------------------------
 async def champion_autocomplete(interaction: discord.Interaction, current: str):
     matches = [
         app_commands.Choice(name=name, value=name)
@@ -718,22 +747,15 @@ async def champion_info_slash(interaction: discord.Interaction, name: str):
 
     data = champions_data[champ_key]
 
-    # Dynamically set the embed color based on Champion Rarity
+    # Set embed color dynamically based on rarity
     rarity = data.get('rarity', 'Unknown').lower()
-    if rarity == "mythical":
-        color = discord.Color.red()
-    elif rarity == "legendary":
-        color = discord.Color.gold()
-    elif rarity == "epic":
-        color = discord.Color.purple()
-    elif rarity == "rare":
-        color = discord.Color.blue()
-    elif rarity == "uncommon":
-        color = discord.Color.green()
-    elif rarity == "common":
-        color = discord.Color.light_grey()
-    else:
-        color = discord.Color.dark_theme()
+    if rarity == "mythical": color = discord.Color.red()
+    elif rarity == "legendary": color = discord.Color.gold()
+    elif rarity == "epic": color = discord.Color.purple()
+    elif rarity == "rare": color = discord.Color.blue()
+    elif rarity == "uncommon": color = discord.Color.green()
+    elif rarity == "common": color = discord.Color.light_grey()
+    else: color = discord.Color.dark_theme()
 
     embed = discord.Embed(
         title=f"🔥 {data.get('name', champ_key)}",
@@ -751,17 +773,9 @@ async def champion_info_slash(interaction: discord.Interaction, name: str):
     areas_str = ", ".join(areas) if areas else "General PvE"
     embed.add_field(name="🏰 Top Viable Areas", value=f"`{areas_str}`", inline=False)
 
-    # ----------------------------------------------------
-    # NEW DYNAMIC SKILL EXTRACTOR
-    # ----------------------------------------------------
-    active_skills = data.get('active_skills', [])
-    for skill in active_skills:
-        # Discord has a 1024 character limit per field, so we slice it just in case!
-        embed.add_field(name=f"⚔️ {skill.get('title', 'Active Skill')}", value=skill.get('desc', 'No description')[:1021] + "...", inline=False)
-
-    passive_skills = data.get('passive_skills', [])
-    for skill in passive_skills:
-        embed.add_field(name=f"🛡️ {skill.get('title', 'Passive Skill')}", value=skill.get('desc', 'No description')[:1021] + "...", inline=False)
+    mechanics = data.get('buffs_debuffs', [])
+    mech_str = ", ".join(mechanics) if mechanics else "None listed"
+    embed.add_field(name="⚡ Buffs & Debuffs Kit", value=f"```\n{mech_str}\n```", inline=False)
 
     moves = data.get('moves_multipliers', [])
     moves_str = "\n".join([f"🔹 {m}" for m in moves]) if moves else "No listed formula"
@@ -772,9 +786,9 @@ async def champion_info_slash(interaction: discord.Interaction, name: str):
 
     await interaction.response.send_message(embed=embed)
 
-# ------------------------------------------------------------
-# KEY TRACKING (MODAL POP-UP)
-# ------------------------------------------------------------
+
+# --- Key Tracking (Modal Pop-up) ---
+
 keys_group = app_commands.Group(name="keys", description="Track Hydra and Chimera key usage.")
 
 class KeyUsageModal(discord.ui.Modal, title='Log Key Usage'):
@@ -798,13 +812,15 @@ class KeyUsageModal(discord.ui.Modal, title='Log Key Usage'):
             return await interaction.response.send_message("Please enter a valid number.", ephemeral=True)
         
         amount_used = int(amount_used_str)
-        if amount_used <= 0: return await interaction.response.send_message("Must be greater than 0.", ephemeral=True)
+        if amount_used <= 0: 
+            return await interaction.response.send_message("Must be greater than 0.", ephemeral=True)
 
         hydra_used, chimera_used = get_key_row(user.id, user.display_name)
 
         if self.boss == "hydra":
             if hydra_used + amount_used > HYDRA_MAX_KEYS:
                 return await interaction.response.send_message(f"You cannot use {amount_used} keys. You only have {HYDRA_MAX_KEYS - hydra_used} left.", ephemeral=True)
+                
             hydra_used += amount_used
             set_key_row(user.id, user.display_name, hydra_used, chimera_used)
             await interaction.response.send_message(f"Logged {amount_used} Hydra key(s)! Only {HYDRA_MAX_KEYS - hydra_used}/{HYDRA_MAX_KEYS} keys remain, warrior.")
@@ -812,6 +828,7 @@ class KeyUsageModal(discord.ui.Modal, title='Log Key Usage'):
         elif self.boss == "chimera":
             if chimera_used + amount_used > CHIMERA_MAX_KEYS:
                 return await interaction.response.send_message(f"You cannot use {amount_used} keys. You only have {CHIMERA_MAX_KEYS - chimera_used} left.", ephemeral=True)
+                
             chimera_used += amount_used
             set_key_row(user.id, user.display_name, hydra_used, chimera_used)
             await interaction.response.send_message(f"Logged {amount_used} Chimera key(s)! Only {CHIMERA_MAX_KEYS - chimera_used}/{CHIMERA_MAX_KEYS} keys remain, warrior.")
@@ -826,7 +843,9 @@ async def keys_add_slash(interaction: discord.Interaction, boss: str):
 async def keys_report_slash(interaction):
     cursor = conn.execute("SELECT username, hydra_used, chimera_used FROM keys")
     rows = cursor.fetchall()
-    if not rows: return await interaction.response.send_message("No key usage recorded yet.")
+    
+    if not rows: 
+        return await interaction.response.send_message("No key usage recorded yet.")
 
     def status_emoji(used, max_keys):
         if used >= max_keys: return "🟢"
@@ -836,9 +855,9 @@ async def keys_report_slash(interaction):
     lines = [f"**{u}** | Hydra: {status_emoji(hu, HYDRA_MAX_KEYS)} ({hu}/{HYDRA_MAX_KEYS}) | Chimera: {status_emoji(cu, CHIMERA_MAX_KEYS)} ({cu}/{CHIMERA_MAX_KEYS})" for u, hu, cu in rows]
     await interaction.response.send_message(embed=discord.Embed(title="Key Usage Overview", description="\n".join(lines), color=discord.Color.dark_teal()))
 
-# ------------------------------------------------------------
-# STANDALONE ADMIN & UTILITY COMMANDS
-# ------------------------------------------------------------
+
+# --- Standalone Admin & Utility Commands ---
+
 @tree.command(name="setup", description="Start the Hydra Companion setup wizard.")
 @app_commands.default_permissions(administrator=True)
 async def admin_setup_slash(interaction):
@@ -848,10 +867,13 @@ async def admin_setup_slash(interaction):
 @app_commands.default_permissions(administrator=True)
 async def announce_slash(interaction, message: str):
     channel = interaction.client.get_channel(ANNOUNCE_CHANNEL_ID)
-    if not channel: return await interaction.response.send_message("Announcement channel missing.", ephemeral=True)
+    if not channel: 
+        return await interaction.response.send_message("Announcement channel missing.", ephemeral=True)
+        
     embed = discord.Embed(title="📢 Announcement", description=message, color=discord.Color.blue())
     embed.set_footer(text=f"Posted by {interaction.user}", icon_url=interaction.user.display_avatar.url if interaction.user.display_avatar else None)
     embed.timestamp = discord.utils.utcnow()
+    
     await channel.send(embed=embed)
     await interaction.response.send_message("Announcement sent.", ephemeral=True)
 
@@ -896,6 +918,7 @@ async def reboot_slash(interaction: discord.Interaction):
 async def suggest_button_slash(interaction):
     if interaction.channel.id not in ALLOWED_SUGGEST_BUTTON_CHANNELS:
         return await interaction.response.send_message("This channel is not approved.", ephemeral=True)
+        
     embed = discord.Embed(title="💡 Anonymous Suggestions", description="Want to submit feedback privately?\nClick the button below and I'll open a DM where you can send your anonymous suggestion.", color=discord.Color.green())
     await interaction.response.send_message(embed=embed, view=MessageMeButton())
 
@@ -911,25 +934,33 @@ async def mercy_guide_slash(interaction):
     await interaction.channel.send(embed=build_mercy_guide_embed())
     await interaction.response.send_message("Mercy guide posted.", ephemeral=True)
 
-# ------------------------------------------------------------
-# PULL ADVICE & GENERAL INFO
-# ------------------------------------------------------------
+
+# --- Fun / General Info ---
+
 @tree.command(name="pull-advice", description="Get advice on whether you should pull right now.")
 async def pull_advice_slash(interaction, event: str = None):
     decision = random.choice(["yes", "no"])
-    answer = random.choice(["Yes — send it.", "Absolutely. This shard is calling your name.", "Yep. You will regret skipping more than pulling."] if decision == "yes" else ["No — save your resources.", "Skip. This shard is not worth it.", "Not this one. Your future self will thank you."])
+    answer = random.choice(
+        ["Yes — send it.", "Absolutely. This shard is calling your name.", "Yep. You will regret skipping more than pulling."] 
+        if decision == "yes" else 
+        ["No — save your resources.", "Skip. This shard is not worth it.", "Not this one. Your future self will thank you."]
+    )
+    
     embed = discord.Embed(title="🎲 Should you pull?", description=answer, color=discord.Color.green() if decision == "yes" else discord.Color.red())
     embed.add_field(name="Requested by", value=interaction.user.mention, inline=False)
-    if event: embed.add_field(name="Event", value=event, inline=False)
+    
+    if event: 
+        embed.add_field(name="Event", value=event, inline=False)
+        
     await interaction.response.send_message(embed=embed)
 
 @tree.command(name="support", description="Show the Hydra Companion support server link.")
 async def support_slash(interaction):
     await interaction.response.send_message("**Support Server**\nhttps://discord.gg/DuemMm57jr")
 
-# ------------------------------------------------------------
-# MERCY SLASH COMMANDS
-# ------------------------------------------------------------
+
+# --- Mercy Slash Commands ---
+
 mercy_group = app_commands.Group(name="mercy", description="View and manage your shard mercy counters.")
 
 @mercy_group.command(name="add", description="Log your pulls, specifying EXACTLY which pull triggered a reset.")
@@ -943,20 +974,28 @@ mercy_group = app_commands.Group(name="mercy", description="View and manage your
 @app_commands.autocomplete(shard_type=shard_autocomplete)
 async def mercy_add_slash(interaction, shard_type: str, amount: int, epic_on: int = 0, legendary_on: int = 0, mythical_on: int = 0):
     shard_type = shard_type.lower()
-    if shard_type not in BASE_RATES: return await interaction.response.send_message("Invalid shard.", ephemeral=True)
-    if amount <= 0: return await interaction.response.send_message("Amount must be positive.", ephemeral=True)
+    if shard_type not in BASE_RATES: 
+        return await interaction.response.send_message("Invalid shard.", ephemeral=True)
+    if amount <= 0: 
+        return await interaction.response.send_message("Amount must be positive.", ephemeral=True)
 
     e, l, m = process_mercy_pulls(interaction.user.id, shard_type, amount, epic_on, legendary_on, mythical_on)
     
     emoji = get_shard_emoji(shard_type)
     msg = f"Recorded **{amount}** pulls to your {emoji} **{shard_type.capitalize()}** mercy.\n"
+    
     if epic_on > 0 or legendary_on > 0 or mythical_on > 0:
         msg += "*(Pity resets applied perfectly based on exactly when you pulled your rarities)*\n"
         
     msg += f"**Current Standings:**\n"
-    if shard_type in ("ancient", "void"): msg += f"• **Epic:** {e}\n"
+    
+    if shard_type in ("ancient", "void"): 
+        msg += f"• **Epic:** {e}\n"
+        
     msg += f"• **Legendary:** {l}"
-    if shard_type == "primal": msg += f"\n• **Mythical:** {m}"
+    
+    if shard_type == "primal": 
+        msg += f"\n• **Mythical:** {m}"
     
     await interaction.response.send_message(msg)
 
@@ -964,9 +1003,10 @@ async def mercy_add_slash(interaction, shard_type: str, amount: int, epic_on: in
 @app_commands.autocomplete(shard_type=shard_autocomplete)
 async def mercy_check_slash(interaction, shard_type: str):
     shard_type = shard_type.lower()
-    if shard_type not in BASE_RATES: return await interaction.response.send_message("Invalid shard.", ephemeral=True)
+    if shard_type not in BASE_RATES: 
+        return await interaction.response.send_message("Invalid shard.", ephemeral=True)
+        
     epic, legendary, mythical = get_mercy_row(interaction.user.id, shard_type)
-    
     emoji = get_shard_emoji(shard_type)
     embed = discord.Embed(title=f"{emoji} {shard_type.capitalize()} Mercy Status", color=discord.Color.dark_theme())
 
@@ -995,7 +1035,8 @@ async def mercy_all_slash(interaction):
         emoji = get_shard_emoji(shard)
         
         text = ""
-        if shard in ("ancient", "void"): text += f"**Epic:** {epic} pulls ({calc_epic_chance(shard, epic):.2f}%)\n"
+        if shard in ("ancient", "void"): 
+            text += f"**Epic:** {epic} pulls ({calc_epic_chance(shard, epic):.2f}%)\n"
         
         legendary_chance = calc_legendary_chance(shard, legendary)
         text += f"**Legendary:** {legendary} pulls ({legendary_chance:.2f}%)"
@@ -1006,7 +1047,8 @@ async def mercy_all_slash(interaction):
             text += f"\n**Mythical:** {mythical} pulls ({mythical_chance:.2f}%)"
 
         _, ready, _ = compute_readiness_color_and_flag(shard, legendary_chance, mythical_chance)
-        if ready: text += "\n🔥 **Ready to pull!**"
+        if ready: 
+            text += "\n🔥 **Ready to pull!**"
         
         embed.add_field(name=f"{emoji} {shard.capitalize()}", value=text, inline=True)
 
@@ -1026,7 +1068,9 @@ async def mercy_table_slash(interaction):
         lines = []
         if shard in ("ancient", "void"):
             lines.append(f"🟣 **Epic:** {epic} pulls ({calc_epic_chance(shard, epic):.2f}%)")
+            
         lines.append(f"🟡 **Legendary:** {legendary} pulls ({legendary_chance:.2f}%)")
+        
         if shard == "primal":
             lines.append(f"🔴 **Mythical:** {mythical} pulls ({mythical_chance:.2f}%)")
         
@@ -1061,18 +1105,21 @@ async def mercy_compare_slash(interaction, member: discord.Member):
 @app_commands.autocomplete(shard_type=shard_autocomplete)
 async def mercy_clear_slash(interaction, shard_type: str):
     shard_type = shard_type.lower()
-    if shard_type not in BASE_RATES: return await interaction.response.send_message("Invalid shard.", ephemeral=True)
+    if shard_type not in BASE_RATES: 
+        return await interaction.response.send_message("Invalid shard.", ephemeral=True)
+        
     set_mercy_row(interaction.user.id, shard_type, 0, 0, 0)
     await interaction.response.send_message(f"🧹 Your **{shard_type}** mercy has been reset to 0.")
 
-# ------------------------------------------------------------
-# PERSISTENT REMINDER SLASH COMMANDS
-# ------------------------------------------------------------
+
+# --- Reminders ---
+
 reminder_group = app_commands.Group(name="reminder", description="Set and manage persistent personal reminders.")
 
 @reminder_group.command(name="set", description="Create a reminder for a future time (e.g., 10m, 2h, 1d).")
 async def reminder_set_slash(interaction, duration: str, reminder: str):
     unit, amount = duration[-1].lower(), duration[:-1]
+    
     if not amount.isdigit() or unit not in ["m", "h", "d"]:
         return await interaction.response.send_message("Time must be a number followed by m/h/d (e.g. `10m`, `2h`, `1d`).", ephemeral=True)
     
@@ -1091,7 +1138,8 @@ async def reminder_list_slash(interaction):
     cursor = conn.execute("SELECT id, reminder_text, due_time FROM reminders WHERE user_id=?", (str(interaction.user.id),))
     rows = cursor.fetchall()
     
-    if not rows: return await interaction.response.send_message("You have no active reminders.", ephemeral=True)
+    if not rows: 
+        return await interaction.response.send_message("You have no active reminders.", ephemeral=True)
     
     msg = "**Your Active Reminders:**\n" + "\n".join([f"• **#{r_id}** — {text} (Due <t:{due}:R>)" for r_id, text, due in rows])
     await interaction.response.send_message(msg, ephemeral=True)
@@ -1104,11 +1152,11 @@ async def reminder_cancel_slash(interaction, reminder_id: int):
         
     with conn:
         conn.execute("DELETE FROM reminders WHERE id=?", (reminder_id,))
+        
     await interaction.response.send_message(f"❎ Reminder #{reminder_id} cancelled.", ephemeral=True)
 
-# ============================================================
-#  REGISTER GROUPS & RUN BOT
-# ============================================================
+
+# --- Register Groups & Run ---
 
 tree.add_command(mercy_group)
 tree.add_command(reminder_group)
